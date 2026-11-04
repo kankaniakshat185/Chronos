@@ -13,21 +13,8 @@ from chronos.api.quantity import (
     parse_quantity,
 )
 from chronos.api.resources import add, fits, insufficient, sub
+from tests.strategies import extended_names, resource_names
 
-_ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789"
-
-
-@st.composite
-def _resource_name(draw: st.DrawFn) -> str:
-    # Built from parts rather than from_regex: deterministic to replay and much faster.
-    prefix = ""
-    if draw(st.booleans()):
-        prefix = draw(st.sampled_from(_ALNUM)) + draw(st.text(_ALNUM + ".-", max_size=10)) + "/"
-    return prefix + draw(st.sampled_from(_ALNUM)) + draw(st.text(_ALNUM + "-", max_size=10))
-
-
-extended_names = _resource_name().filter(lambda n: n not in ("cpu", "memory"))
-resource_names = st.one_of(st.sampled_from(["cpu", "memory"]), extended_names)
 resource_maps = st.dictionaries(resource_names, st.integers(0, 10**6), max_size=5)
 
 
