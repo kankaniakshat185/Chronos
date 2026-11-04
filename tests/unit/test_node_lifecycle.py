@@ -112,3 +112,29 @@ async def test_run_loop_ticks_on_the_clock(
         await asyncio.sleep(0)  # noqa: TID251
     assert (await state(client))[0] == NodeCondition.READY
     task.cancel()
+
+
+async def test_not_ready_evicts_active_pods_as_node_lost(
+    client: LocalStoreClient, clock: FakeClock, controller: NodeLifecycleController
+) -> None:
+    from chronos.api import ObjectMeta, Pod, PodPhase, PodSpec  # noqa: PLC0415
+
+    await client.register("n1", "e1", {"cpu": 4000})
+    await controller.tick()
+    for name in ("a", "b"):
+        p = await client.create(Pod(metadata=ObjectMeta(name=name), spec=PodSpec(command=["x"])))
+        await client.bind(name, "n1", p.metadata.resource_version)
+    done = await client.get(Pod, "b")
+    done.status.phase = PodPhase.SUCCEEDED
+    await client.update_status(done)
+
+    clock.advance(5.0)
+    await controller.tick()
+    a, b = await client.get(Pod, "a"), await client.get(Pod, "b")
+    assert (a.status.phase, a.status.reason) == (PodPhase.FAILED, "NodeLost")
+    assert (b.status.phase, b.status.reason) == (PodPhase.SUCCEEDED, "")  # finished: untouched
+    assert (await client.get(Node, "n1")).status.allocated["cpu"] == 0
+
+    rev = client.store.revision
+    await controller.tick()
+    assert client.store.revision == rev  # nothing left to evict

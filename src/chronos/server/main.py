@@ -11,6 +11,7 @@ from chronos import __version__
 from chronos.client.local import LocalStoreClient
 from chronos.common.clock import RealClock
 from chronos.common.config import Timings
+from chronos.controllers.deployment import DeploymentController
 from chronos.controllers.node_lifecycle import NodeLifecycleController
 from chronos.controllers.scheduler import SchedulerController
 from chronos.core.schedule import SchedulerConfig, resolve
@@ -32,7 +33,8 @@ def build(timings: Timings) -> FastAPI:
     scheduler = SchedulerController(
         client, clock, resolve(SchedulerConfig()), timings.scheduler_tick
     )
-    return create_app(client, loops=[lifecycle.run, scheduler.run])
+    deployments = DeploymentController(client, clock, timings.deployment_tick)
+    return create_app(client, loops=[lifecycle.run, scheduler.run, deployments.run])
 
 
 @app.command()
