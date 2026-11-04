@@ -12,6 +12,8 @@ from chronos.client.local import LocalStoreClient
 from chronos.common.clock import RealClock
 from chronos.common.config import Timings
 from chronos.controllers.node_lifecycle import NodeLifecycleController
+from chronos.controllers.scheduler import SchedulerController
+from chronos.core.schedule import SchedulerConfig, resolve
 from chronos.server.app import create_app
 from chronos.store import Store
 from chronos.store.leases import Leases
@@ -27,7 +29,10 @@ def build(timings: Timings) -> FastAPI:
     clock = RealClock()
     client = LocalStoreClient(Store(clock), Leases(clock))
     lifecycle = NodeLifecycleController(client, clock, timings)
-    return create_app(client, loops=[lifecycle.run])
+    scheduler = SchedulerController(
+        client, clock, resolve(SchedulerConfig()), timings.scheduler_tick
+    )
+    return create_app(client, loops=[lifecycle.run, scheduler.run])
 
 
 @app.command()

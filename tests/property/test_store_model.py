@@ -110,6 +110,7 @@ class StoreModel(RuleBasedStateMachine):
         if self._call(expected, lambda: self.store.bind(name, node, rv)) is not None:
             m = self.pods[name]
             m.node_name, m.rv = node, self.revision
+            m.message = ""  # bind clears a stale reason/message (e.g. Unschedulable)
             self.bound_uids[m.uid] = node
 
     @rule(name=NAMES, offset=st.one_of(st.none(), RV_OFFSET))

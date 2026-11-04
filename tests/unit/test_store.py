@@ -262,7 +262,11 @@ def test_terminal_phase_is_final(cluster: Store) -> None:
 def test_node_allocated_is_derived_not_stored(cluster: Store) -> None:
     n = cluster.get(Node, "n1")
     n.status.allocated = {"cpu": 999_000}
-    assert cluster.update_status(n).status.allocated == {}
+    assert cluster.update_status(n).status.allocated == {
+        "cpu": 0,
+        "memory": 0,
+        "chronos.dev/slot": 0,
+    }
 
 
 # ---- delete --------------------------------------------------------------------------
@@ -305,7 +309,11 @@ def test_bind_sets_node_phase_and_allocation(cluster: Store) -> None:
     assert bound.metadata.generation == 1
     assert [p.metadata.name for p in cluster.pods_on("n1")] == ["p1"]
     assert cluster.pods_on("") == []
-    assert cluster.get(Node, "n1").status.allocated == {"cpu": 500, "memory": 1 << 30}
+    assert cluster.get(Node, "n1").status.allocated == {
+        "cpu": 500,
+        "memory": 1 << 30,
+        "chronos.dev/slot": 0,
+    }
 
 
 def test_bind_with_stale_rv_conflicts(cluster: Store) -> None:
@@ -396,4 +404,4 @@ def test_deleting_a_bound_pod_frees_resources(cluster: Store) -> None:
     cluster.bind("a", "n1", a.metadata.resource_version)
     cluster.delete(Pod, "a")
     assert cluster.pods_on("n1") == []
-    assert cluster.get(Node, "n1").status.allocated == {}
+    assert cluster.get(Node, "n1").status.allocated["chronos.dev/slot"] == 0

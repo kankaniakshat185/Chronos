@@ -175,6 +175,7 @@ class Store:
         # Binding is a system write, not a user spec change, so generation stays.
         new.spec.node_name = node_name
         new.status.phase = PodPhase.BOUND
+        new.status.reason, new.status.message = "", ""  # e.g. a stale "Unschedulable"
         self._pods_by_node[UNBOUND].discard(pod_name)
         self._pods_by_node.setdefault(node_name, set()).add(pod_name)
         return self._commit(new)
@@ -208,5 +209,7 @@ class Store:
     def _present[T: (Node, Pod, Deployment)](self, obj: T) -> T:
         out = obj.model_copy(deep=True)
         if isinstance(out, Node):
-            out.status.allocated = self.allocated(out.metadata.name)
+            # Same keys as capacity (zeros included), plus anything bound beyond it.
+            used = self.allocated(out.metadata.name)
+            out.status.allocated = {n: used.get(n, 0) for n in out.spec.capacity.keys() | used}
         return out

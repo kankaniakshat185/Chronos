@@ -27,15 +27,16 @@ async def ready_nodes(api: HttpStoreClient, *names: str) -> None:
 
 
 async def run_pod(api: HttpStoreClient, name: str, node: str, command: list[str]) -> Pod:
-    """Create and bind a pod (no scheduler yet), then wait until it's Running."""
-    created = await api.create(Pod(metadata=ObjectMeta(name=name), spec=PodSpec(command=command)))
-    await api.bind(name, node, created.metadata.resource_version)
+    """Create a pod and wait until it's Running; the scheduler must have put it on `node`."""
+    await api.create(Pod(metadata=ObjectMeta(name=name), spec=PodSpec(command=command)))
 
     async def running() -> Pod | None:
         p = await api.get(Pod, name)
         return p if p.status.phase == PodPhase.RUNNING else None
 
-    return await eventually(running)
+    pod = await eventually(running)
+    assert pod.spec.node_name == node
+    return pod
 
 
 async def test_three_agents_register_and_become_ready(
@@ -120,10 +121,9 @@ async def test_workload_exit_is_reported_as_failed(cluster: Cluster, api: HttpSt
 async def test_unstartable_command_fails_the_pod(cluster: Cluster, api: HttpStoreClient) -> None:
     cluster.start_agent("a")
     await ready_nodes(api, "a")
-    created = await api.create(
+    await api.create(
         Pod(metadata=ObjectMeta(name="typo"), spec=PodSpec(command=["/no/such/binary"]))
     )
-    await api.bind("typo", "a", created.metadata.resource_version)
 
     async def failed() -> Pod | None:
         p = await api.get(Pod, "typo")
