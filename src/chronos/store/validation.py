@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from chronos.api import Pod, PodPhase
 from chronos.api.kinds import Obj
+from chronos.api.pod import TERMINAL_PHASES
 from chronos.store.errors import Invalid
 
 
@@ -37,7 +38,7 @@ def validate_spec_update(current: Obj, new: Obj) -> None:
         raise Invalid(f"Pod {name!r}: spec.node_name can only be set by bind, once")
 
 
-TERMINAL = frozenset({PodPhase.SUCCEEDED, PodPhase.FAILED})
+TERMINAL = TERMINAL_PHASES
 
 
 def validate_status_update(current: Obj, new: Obj) -> None:

@@ -57,3 +57,7 @@ def run(
 def version() -> None:
     """Print the Chronos version."""
     typer.echo(__version__)
+
+
+if __name__ == "__main__":
+    app()

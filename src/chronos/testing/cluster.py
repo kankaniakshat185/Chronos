@@ -1,0 +1,173 @@
+"""A real Chronos cluster for integration tests: `chronosd` + agents as subprocesses (P2.9).
+
+Everything runs on free localhost ports under one temp directory. `kill_node()`
+is a crash-stop of a whole node, like a machine losing power: it SIGKILLs the
+agent and every pod process group it started (from the agent's pidfiles). The
+demo's `scripts/kill-node.sh` calls the same function.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import signal
+import socket
+import subprocess
+import sys
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+import httpx
+
+from chronos.common.clock import RealClock
+
+_clock = RealClock()
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+async def eventually[T](
+    probe: Callable[[], Awaitable[T]], *, within: float = 10.0, interval: float = 0.05
+) -> T:
+    """Poll `probe` until it returns a truthy value; fail with the last value seen."""
+    deadline = _clock.monotonic() + within
+    while True:
+        value = await probe()
+        if value:
+            return value
+        if _clock.monotonic() > deadline:
+            raise AssertionError(f"not true after {within}s; last value: {value!r}")
+        await _clock.sleep(interval)
+
+
+def alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def kill_node(data_dir: Path) -> None:
+    """SIGKILL the agent whose data dir this is, and all of its pods' process groups."""
+    agent_pid = data_dir / "agent.pid"
+    if agent_pid.exists():
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(int(agent_pid.read_text()), signal.SIGKILL)
+    for pidfile in (data_dir / "pids").glob("*"):
+        with contextlib.suppress(ProcessLookupError, ValueError):
+            os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+
+
+@dataclass(frozen=True)
+class Timings:
+    heartbeat_interval: float = 0.2
+    node_grace: float = 0.8
+    eviction_timeout: float = 2.0
+    poll_interval: float = 0.1
+    termination_grace: float = 1.0
+
+
+class Cluster:
+    def __init__(self, root: Path, timings: Timings | None = None) -> None:
+        self.root = root
+        self.timings = timings or Timings()
+        self.port = free_port()
+        self.url = f"http://127.0.0.1:{self.port}"
+        self._server: subprocess.Popen[bytes] | None = None
+        self.agents: dict[str, subprocess.Popen[bytes]] = {}
+
+    def _spawn(self, log_name: str, args: list[str]) -> subprocess.Popen[bytes]:
+        with (self.root / f"{log_name}.log").open("ab") as log:  # the child keeps its own fd
+            return subprocess.Popen(
+                [sys.executable, "-m", *args],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+    async def start(self) -> None:
+        t = self.timings
+        self._server = self._spawn(
+            "chronosd",
+            [
+                "chronos.server.main", "run", "--port", str(self.port),
+                "--heartbeat-interval", str(t.heartbeat_interval),
+                "--node-grace", str(t.node_grace),
+                "--eviction-timeout", str(t.eviction_timeout),
+            ],
+        )  # fmt: skip
+
+        async def healthy() -> bool:
+            try:
+                async with httpx.AsyncClient() as c:
+                    return (await c.get(f"{self.url}/healthz", timeout=0.5)).is_success
+            except httpx.TransportError:
+                return False
+
+        await eventually(healthy, within=15.0)
+
+    def agent_dir(self, name: str) -> Path:
+        return self.root / "agents" / name
+
+    def start_agent(
+        self, name: str, cpu: str = "4", mem: str = "8Gi", resources: dict[str, int] | None = None
+    ) -> None:
+        t = self.timings
+        args = [
+            "chronos.agent.main", "run", "--name", name, "--cpu", cpu, "--mem", mem,
+            "--server", self.url, "--data-dir", str(self.agent_dir(name)),
+            "--heartbeat-interval", str(t.heartbeat_interval),
+            "--poll-interval", str(t.poll_interval),
+            "--termination-grace", str(t.termination_grace),
+        ]  # fmt: skip
+        for res, units in (resources or {}).items():
+            args += ["--resource", f"{res}={units}"]
+        self.agents[name] = self._spawn(f"agent-{name}", args)
+
+    def kill_node(self, name: str) -> None:
+        kill_node(self.agent_dir(name))
+        if (proc := self.agents.pop(name, None)) is not None:
+            proc.wait(timeout=5)
+
+    def stop_agent(self, name: str) -> None:
+        """Graceful: SIGTERM, so the agent stops its workloads first."""
+        proc = self.agents.pop(name)
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10)
+
+    def pod_pgids(self) -> list[int]:
+        return [
+            int(f.read_text())
+            for f in (self.root / "agents").glob("*/pids/*")
+            if f.read_text().strip().isdigit()
+        ]
+
+    async def close(self) -> list[int]:
+        """Stop everything; return the process groups of pods still alive (should be [])."""
+        for name in list(self.agents):
+            self.stop_agent(name)
+        if self._server is not None:
+            self._server.terminate()
+            self._server.wait(timeout=10)
+
+        async def none_alive() -> bool:
+            return not any(alive(g) for g in self.pod_pgids())
+
+        with contextlib.suppress(AssertionError):
+            await eventually(none_alive, within=3.0)
+        leaked = [g for g in self.pod_pgids() if alive(g)]
+        for pgid in leaked:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pgid, signal.SIGKILL)
+        return leaked
+
+    def logs(self) -> str:
+        return "\n".join(f"==> {p.name}\n{p.read_text()}" for p in sorted(self.root.glob("*.log")))

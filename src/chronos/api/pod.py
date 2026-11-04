@@ -25,6 +25,9 @@ class PodPhase(StrEnum):
     FAILED = "Failed"
 
 
+TERMINAL_PHASES = frozenset({PodPhase.SUCCEEDED, PodPhase.FAILED})
+
+
 class PodTemplate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -42,6 +42,7 @@ ignore = ["PLR2004", "PLR0913"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/chronos/common/clock.py" = ["TID251"]
+"src/chronos/testing/workload.py" = ["TID251"]  # a plain sync test process
 
 [tool.mypy]
 strict = true
