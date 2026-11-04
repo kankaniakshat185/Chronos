@@ -18,12 +18,12 @@ import uuid
 from collections.abc import Callable, Mapping
 
 from chronos.api import Deployment, Node, NodeCondition, Pod, PodPhase
+from chronos.api.kinds import Obj
 from chronos.api.resources import add, insufficient, sub
 from chronos.common.clock import Clock
 from chronos.store.errors import AlreadyExists, Conflict, InsufficientCapacity, Invalid, NotFound
 from chronos.store.validation import (
     TERMINAL,
-    Obj,
     validate_create,
     validate_spec_update,
     validate_status_update,

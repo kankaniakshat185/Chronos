@@ -13,7 +13,7 @@ All ADRs start as **Proposed** (drafted during planning, 2026-10-21). They becom
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted | P0 |
 | [0002](0002-python-as-implementation-language.md) | Python 3.12 as the implementation language | Accepted | P0 |
 | [0003](0003-tooling.md) | Tooling: uv, ruff, mypy strict, pytest + Hypothesis | Proposed | P0 |
-| [0004](0004-http-json-transport.md) | HTTP/JSON (FastAPI) transport; gRPC deferred | Proposed | P1 |
+| [0004](0004-http-json-transport.md) | HTTP/JSON (FastAPI) transport; gRPC deferred | Accepted | P1 |
 | [0005](0005-workloads-are-os-processes.md) | Workloads are OS processes supervised by node agents | Proposed | P2 |
 | [0006](0006-functional-core-imperative-shell.md) | Functional core, imperative shell, injected clock | Accepted | P0 |
 | [0007](0007-versioned-single-writer-store.md) | Versioned single-writer store with optimistic concurrency | Proposed | P1 |

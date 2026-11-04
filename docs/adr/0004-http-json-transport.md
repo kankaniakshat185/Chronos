@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P1 | — | — |
+| Accepted | 2026-11-04 | P1 | — | — |
 
 ## 1. What
 The control-plane API is **REST/JSON over HTTP/1.1**, served by **FastAPI + uvicorn**, with **Pydantic v2** models shared by server, agent and CLI. Clients use **httpx**. All access goes through a `StoreClient` protocol so the transport can be swapped (gRPC = stretch M3) without touching agent or controller logic.
@@ -47,7 +47,9 @@ class StoreClient(Protocol):
     async def heartbeat(self, node: str, epoch: str) -> HeartbeatReply: ...
 ```
 - Error mapping (server → HTTP → client exception): `Conflict` ↔ 409, `NotFound` ↔ 404, `AlreadyExists` ↔ 409 (with a distinct `reason`), `Compacted` ↔ 410, `ValidationError` ↔ 422, `NotLeader` ↔ 503 (reserved, ADR-0018).
-- Bodies: `{"kind": ..., "metadata": {...}, "spec": {...}, "status": {...}}`. Errors: `{"reason": "Conflict", "message": ..., "current_resource_version": ...}`.
+- Bodies: `{"kind": ..., "metadata": {...}, "spec": {...}, "status": {...}}`. Errors: `{"reason": "Conflict", "message": ..., "details": {"expected": ..., "current": ...}}`; `details` carries whatever the client needs to rebuild the same exception (`chronos.store.errors.from_body`).
+- `POST /api/v1/nodes/{name}/register {agent_epoch, capacity}` (added in the MVP, not in PLAN.md §4.4): creates the node or adopts it for a new agent incarnation. The new epoch makes heartbeats from older incarnations fail with `409 EpochMismatch`.
+- Implementation status (2026-11-04): CRUD, status, binding, register and heartbeat are implemented and covered by one contract suite run against both clients. The `watch` method and endpoint arrive in PM-3 (ADR-0008).
 - httpx: one `AsyncClient` per process, connection pooling on, **explicit timeouts on every call** (no defaults).
 ### Configuration
 | Param | Default |

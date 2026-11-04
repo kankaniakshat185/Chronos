@@ -5,10 +5,9 @@ Each function either returns normally or raises `Invalid`; none mutates its inpu
 
 from __future__ import annotations
 
-from chronos.api import Deployment, Node, Pod, PodPhase
+from chronos.api import Pod, PodPhase
+from chronos.api.kinds import Obj
 from chronos.store.errors import Invalid
-
-type Obj = Node | Pod | Deployment
 
 
 def validate_create(obj: Obj) -> None:
