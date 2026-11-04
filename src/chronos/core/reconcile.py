@@ -90,7 +90,10 @@ def reconcile(dep: Deployment, pods: list[Pod]) -> list[Action]:
             for p in pick_victims(active, -diff)
         ]
 
-    finished = sorted((p for p in pods if not is_active(p)), key=_created, reverse=True)
+    # Terminating pods are neither active nor finished: their agent is stopping them.
+    finished = sorted(
+        (p for p in pods if p.status.phase in TERMINAL_PHASES), key=_created, reverse=True
+    )
     actions += [
         DeletePod(p.metadata.name, p.metadata.resource_version) for p in finished[KEEP_FINISHED:]
     ]

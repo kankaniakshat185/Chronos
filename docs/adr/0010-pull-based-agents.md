@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P2 | — | — |
+| Accepted | 2026-11-05 | P2 | — | — |
 
 ## 1. What
 Agents **pull** their work: they register, heartbeat, and watch for pods bound to them. The control plane **never connects to an agent**. Each agent is itself level-triggered: it continuously makes its local processes match the pod list the control plane holds for it.
@@ -58,6 +58,9 @@ def agent_sync(desired: list[Pod], local: dict[PodUID, LocalProc], fenced: bool)
 - **Agent restart:** orphan cleanup (ADR-0005), then register with a new epoch, relist, and sync from scratch.
 - **Pod rebound elsewhere after a partition heals:** it's no longer in `want` → `StopProcess`. (Normally it's already dead via fencing, ADR-0012.)
 - **Status update Conflict:** re-read the pod and re-send if still relevant (the pod may have been deleted meanwhile).
+
+### Implementation status (2026-11-05)
+Agents pull: they register, heartbeat and read the pods bound to them; the control plane never connects to an agent. In Stage 1 so far the read is a 500 ms poll of `GET /pods?node=<self>` (ADR-0022); PM-3 switches it to a long-poll watch without changing the pull model.
 
 ## 5. Consequences
 **Positive:** the control plane is stateless about connections; the agent is crash-safe; partitions degrade gracefully; mirrors kubelet.

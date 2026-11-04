@@ -399,9 +399,58 @@ def test_terminal_pods_free_their_resources(cluster: Store) -> None:
     assert cluster.bind("b", "n1", b.metadata.resource_version).spec.node_name == "n1"
 
 
-def test_deleting_a_bound_pod_frees_resources(cluster: Store) -> None:
+def test_deleting_a_bound_pod_marks_it_terminating(cluster: Store) -> None:
+    a = cluster.create(pod("a", **{"chronos.dev/slot": 1}))
+    a = cluster.bind("a", "n1", a.metadata.resource_version)
+    marked = cluster.delete(Pod, "a")
+    assert marked.metadata.deletion_timestamp is not None
+    assert marked.metadata.resource_version == a.metadata.resource_version + 1
+    assert cluster.get(Node, "n1").status.allocated["chronos.dev/slot"] == 1  # still running
+    rev = cluster.revision
+    assert cluster.delete(Pod, "a").metadata.deletion_timestamp is not None  # idempotent
+    assert cluster.revision == rev
+
+
+def test_terminating_pod_spec_is_frozen_but_status_isnt(cluster: Store) -> None:
+    a = cluster.create(pod("a"))
+    cluster.bind("a", "n1", a.metadata.resource_version)
+    p = cluster.delete(Pod, "a")
+    p.spec.env = {"X": "1"}
+    with pytest.raises(Invalid, match="terminating"):
+        cluster.update(p)
+    p = cluster.get(Pod, "a")
+    p.status.message = "stopping"
+    assert cluster.update_status(p).status.message == "stopping"
+
+
+def test_force_delete_removes_and_frees_resources(cluster: Store) -> None:
     a = cluster.create(pod("a", **{"chronos.dev/slot": 1}))
     cluster.bind("a", "n1", a.metadata.resource_version)
     cluster.delete(Pod, "a")
+    cluster.delete(Pod, "a", force=True)
     assert cluster.pods_on("n1") == []
     assert cluster.get(Node, "n1").status.allocated["chronos.dev/slot"] == 0
+
+
+def test_unbound_and_finished_pods_are_removed_at_once(cluster: Store) -> None:
+    cluster.delete(Pod, "p1")  # unbound
+    with pytest.raises(NotFound):
+        cluster.get(Pod, "p1")
+    done = cluster.create(pod("done"))
+    done = cluster.bind("done", "n1", done.metadata.resource_version)
+    done.status.phase = PodPhase.SUCCEEDED
+    cluster.update_status(done)
+    cluster.delete(Pod, "done")
+    with pytest.raises(NotFound):
+        cluster.get(Pod, "done")
+
+
+def test_terminating_pod_cannot_be_bound(store: Store) -> None:
+    store.create(node(cpu=4))
+    ready(store)
+    p = store.create(pod())
+    p = store.bind("p1", "n1", p.metadata.resource_version)
+    p = store.delete(Pod, "p1")
+    store.create(node("n2", cpu=4))
+    with pytest.raises(Invalid):
+        store.bind("p1", "n2", p.metadata.resource_version)

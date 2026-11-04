@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.162.0",
     "httpx>=0.28.1",
+    "psutil>=7.2.2",
     "pydantic>=2.14.2",
     "pyyaml>=6.0.3",
     "typer>=0.27.3",
@@ -16,6 +17,7 @@ dependencies = [
 chronosd = "chronos.server.main:app"
 chronos-agent = "chronos.agent.main:app"
 chronosctl = "chronos.cli.main:app"
+chronos-shim = "chronos.shim.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -44,6 +46,7 @@ ignore = ["PLR2004", "PLR0913"]
 [tool.ruff.lint.per-file-ignores]
 "src/chronos/common/clock.py" = ["TID251"]
 "src/chronos/testing/workload.py" = ["TID251"]  # a plain sync test process
+"src/chronos/shim/__main__.py" = ["TID251"]  # separate sync process; same clock as the agent
 
 [tool.mypy]
 strict = true
@@ -85,5 +88,6 @@ dev = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.3",
+    "types-psutil>=7.2.2.20260906",
     "types-pyyaml>=6.0.12.20261103",
 ]

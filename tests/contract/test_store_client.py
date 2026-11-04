@@ -21,6 +21,7 @@ from chronos.api import (
 )
 from chronos.client import HttpStoreClient, LocalStoreClient, StoreClient
 from chronos.common.clock import FakeClock
+from chronos.common.config import FencingConfig
 from chronos.server.app import create_app
 from chronos.store import AlreadyExists, Conflict, InsufficientCapacity, Invalid, NotFound, Store
 from chronos.store.errors import EpochMismatch
@@ -51,7 +52,7 @@ def pod(name: str = "p1", **requests: int | str) -> Pod:
 
 
 async def ready_node(client: StoreClient, local: LocalStoreClient, name: str = "n1") -> Node:
-    node = await client.register(name, "epoch-1", {"cpu": 4000, "chronos.dev/slot": 1})
+    node = (await client.register(name, "epoch-1", {"cpu": 4000, "chronos.dev/slot": 1})).node
     node.status.condition = NodeCondition.READY  # what the lifecycle controller would do
     return await client.update_status(node)
 
@@ -141,11 +142,11 @@ async def test_bind_insufficient_names_the_resource(
 
 
 async def test_register_creates_then_adopts(client: StoreClient) -> None:
-    first = await client.register("n1", "epoch-1", {"cpu": 2000})
+    first = (await client.register("n1", "epoch-1", {"cpu": 2000})).node
     assert first.status.agent_epoch == "epoch-1"
     assert first.status.condition == NodeCondition.UNKNOWN
     assert first.spec.capacity == {"cpu": 2000}  # internal units in, internal units out
-    again = await client.register("n1", "epoch-2", {"cpu": 4000})
+    again = (await client.register("n1", "epoch-2", {"cpu": 4000})).node
     assert again.status.agent_epoch == "epoch-2"
     assert again.spec.capacity == {"cpu": 4000}
     assert again.metadata.uid == first.metadata.uid
@@ -177,3 +178,16 @@ async def test_node_created_directly_can_heartbeat(client: StoreClient) -> None:
     )
     await client.create(node)
     assert (await client.heartbeat("n1", "e1")).condition == NodeCondition.UNKNOWN
+
+
+async def test_register_returns_the_eviction_timeout(client: StoreClient) -> None:
+    reply = await client.register("n1", "e1", {}, FencingConfig())
+    assert reply.eviction_timeout == 10.0
+
+
+async def test_register_refuses_unsafe_fencing_timings(client: StoreClient) -> None:
+    unsafe = FencingConfig(fence_timeout=8.0, termination_grace=2.0, drift_margin=0.5)
+    with pytest.raises(Invalid, match=r"must be < eviction_timeout = 10s"):
+        await client.register("n1", "e1", {}, unsafe)
+    with pytest.raises(NotFound):
+        await client.get(Node, "n1")  # nothing was created

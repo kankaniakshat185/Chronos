@@ -62,3 +62,11 @@ async def test_transport_failure_raises_unavailable() -> None:
     async with HttpStoreClient("http://chronosd", transport=httpx.MockTransport(refuse)) as c:
         with pytest.raises(Unavailable):
             await c.heartbeat("n1", "e1")
+
+
+async def test_unknown_workload_type_is_422(raw: httpx.AsyncClient) -> None:
+    async with raw:
+        pod = {"metadata": {"name": "p"}, "spec": {"command": ["x"], "workload_type": "nope"}}
+        r = await raw.post("/api/v1/pods", json=pod)
+        assert r.status_code == 422
+        assert "unknown workload_type 'nope'" in r.json()["message"]

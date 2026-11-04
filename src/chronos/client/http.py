@@ -21,8 +21,10 @@ from chronos.api.wire import (
     ErrorBody,
     HeartbeatReply,
     HeartbeatRequest,
+    RegisterReply,
     RegisterRequest,
 )
+from chronos.common.config import FencingConfig
 from chronos.store.errors import StoreError, Unavailable, from_body
 
 PREFIX = "/api/v1"
@@ -111,9 +113,11 @@ class HttpStoreClient:
         return type(obj).model_validate_json(response.content)
 
     async def delete[T: (Node, Pod, Deployment)](
-        self, kind: type[T], name: str, expected_rv: int | None = None
+        self, kind: type[T], name: str, expected_rv: int | None = None, *, force: bool = False
     ) -> T:
-        params = {} if expected_rv is None else {"resource_version": expected_rv}
+        params: dict[str, str | int] = {"force": "true"} if force else {}
+        if expected_rv is not None:
+            params["resource_version"] = expected_rv
         response = await self._request("DELETE", f"/{PLURALS[kind]}/{name}", params=params)
         return kind.model_validate_json(response.content)
 
@@ -122,13 +126,26 @@ class HttpStoreClient:
         response = await self._request("POST", f"/pods/{pod}/binding", body=body)
         return Pod.model_validate_json(response.content)
 
-    async def register(self, node: str, agent_epoch: str, capacity: Mapping[str, int]) -> Node:
+    async def register(
+        self,
+        node: str,
+        agent_epoch: str,
+        capacity: Mapping[str, int],
+        fencing: FencingConfig | None = None,
+    ) -> RegisterReply:
+        f = fencing or FencingConfig()
         # Canonical strings: a bare int would be re-read as whole cores for cpu.
         body = RegisterRequest.model_validate(
-            {"agent_epoch": agent_epoch, "capacity": format_resources(capacity)}
+            {
+                "agent_epoch": agent_epoch,
+                "capacity": format_resources(capacity),
+                "fence_timeout": f.fence_timeout,
+                "termination_grace": f.termination_grace,
+                "drift_margin": f.drift_margin,
+            }
         )
         response = await self._request("POST", f"/nodes/{node}/register", body=body)
-        return Node.model_validate_json(response.content)
+        return RegisterReply.model_validate_json(response.content)
 
     async def heartbeat(self, node: str, agent_epoch: str) -> HeartbeatReply:
         body = HeartbeatRequest(agent_epoch=agent_epoch)

@@ -1,12 +1,14 @@
 """Agents and real processes (P2.10 subset): registration, health, start/stop, exits."""
 
+import os
 import sys
 
 import pytest
 
-from chronos.api import Node, NodeCondition, ObjectMeta, Pod, PodPhase, PodSpec
+from chronos.api import Node, NodeCondition, ObjectMeta, Pod, PodPhase, PodSpec, RestartPolicy
 from chronos.client import HttpStoreClient
 from chronos.common.clock import RealClock
+from chronos.store import NotFound
 from chronos.testing.cluster import Cluster, alive, eventually
 
 pytestmark = pytest.mark.integration
@@ -26,9 +28,16 @@ async def ready_nodes(api: HttpStoreClient, *names: str) -> None:
     await eventually(all_ready)
 
 
-async def run_pod(api: HttpStoreClient, name: str, node: str, command: list[str]) -> Pod:
+async def run_pod(
+    api: HttpStoreClient,
+    name: str,
+    node: str,
+    command: list[str],
+    policy: RestartPolicy = RestartPolicy.ALWAYS,
+) -> Pod:
     """Create a pod and wait until it's Running; the scheduler must have put it on `node`."""
-    await api.create(Pod(metadata=ObjectMeta(name=name), spec=PodSpec(command=command)))
+    spec = PodSpec(command=command, restart_policy=policy)
+    await api.create(Pod(metadata=ObjectMeta(name=name), spec=spec))
 
     async def running() -> Pod | None:
         p = await api.get(Pod, name)
@@ -61,7 +70,9 @@ async def test_bound_pod_becomes_a_real_process(cluster: Cluster, api: HttpStore
         return log.read_text() if log.exists() else ""
 
     line = await eventually(logged)
-    assert f"hello pod=web node=a pid={pod.status.pid}" in line
+    assert "hello pod=web node=a pid=" in line
+    workload_pid = int(line.split("pid=")[1].split()[0])
+    assert os.getpgid(workload_pid) == pod.status.pid  # the workload runs under its shim
     assert (cluster.agent_dir("a") / "pids" / pod.metadata.uid).read_text() == str(pod.status.pid)
 
 
@@ -108,7 +119,8 @@ async def test_sigterm_ignoring_workload_is_killed_after_grace(
 async def test_workload_exit_is_reported_as_failed(cluster: Cluster, api: HttpStoreClient) -> None:
     cluster.start_agent("a")
     await ready_nodes(api, "a")
-    await run_pod(api, "crashy", "a", workload("--crash-after", "0.3", "--exit-code", "3"))
+    command = workload("--crash-after", "0.3", "--exit-code", "3")
+    await run_pod(api, "crashy", "a", command, RestartPolicy.NEVER)  # Always would restart it
 
     async def failed() -> Pod | None:
         p = await api.get(Pod, "crashy")
@@ -122,7 +134,10 @@ async def test_unstartable_command_fails_the_pod(cluster: Cluster, api: HttpStor
     cluster.start_agent("a")
     await ready_nodes(api, "a")
     await api.create(
-        Pod(metadata=ObjectMeta(name="typo"), spec=PodSpec(command=["/no/such/binary"]))
+        Pod(
+            metadata=ObjectMeta(name="typo"),
+            spec=PodSpec(command=["/no/such/binary"], restart_policy=RestartPolicy.NEVER),
+        )
     )
 
     async def failed() -> Pod | None:
@@ -191,3 +206,34 @@ async def test_graceful_agent_stop_stops_its_workloads(
     assert pod.status.pid is not None
     assert not alive(pod.status.pid)
     assert not list((cluster.agent_dir("a") / "pids").iterdir())
+
+
+async def test_two_phase_deletion_keeps_the_pod_until_its_process_is_gone(
+    cluster: Cluster, api: HttpStoreClient
+) -> None:
+    """P4.7: the pod stays visible (Terminating) for as long as its process runs."""
+    cluster.start_agent("a")
+    await ready_nodes(api, "a")
+    pod = await run_pod(api, "stubborn", "a", workload("--ignore-sigterm"))
+    pgid = pod.status.pid
+    assert pgid is not None
+
+    marked = await api.delete(Pod, "stubborn")
+    assert marked.metadata.deletion_timestamp is not None
+    samples: list[tuple[bool, bool]] = []  # (pod still in the API, process alive)
+
+    async def removed() -> bool:
+        try:
+            await api.get(Pod, "stubborn")
+            exists = True
+        except NotFound:
+            exists = False
+        samples.append((exists, alive(pgid)))
+        return not exists
+
+    await eventually(removed, within=cluster.timings.termination_grace + 3.0, interval=0.02)
+    assert not alive(pgid)
+    assert all(exists for exists, running in samples if running), (
+        "the pod left the API while its process was still running"
+    )
+    assert samples[0] == (True, True)  # Terminating, still running through the grace

@@ -12,16 +12,19 @@ from collections.abc import Mapping
 
 from chronos.api import Deployment, Node, NodeSpec, NodeStatus, ObjectMeta, Pod
 from chronos.api.resources import format_resources
-from chronos.api.wire import HeartbeatReply
-from chronos.store import NotFound, Store
+from chronos.api.wire import HeartbeatReply, RegisterReply
+from chronos.common.config import FencingConfig
+from chronos.core.fencing import inequality_violation
+from chronos.store import Invalid, NotFound, Store
 from chronos.store.errors import EpochMismatch
 from chronos.store.leases import Leases
 
 
 class LocalStoreClient:
-    def __init__(self, store: Store, leases: Leases) -> None:
+    def __init__(self, store: Store, leases: Leases, eviction_timeout: float = 10.0) -> None:
         self.store = store
         self.leases = leases
+        self.eviction_timeout = eviction_timeout
 
     async def get[T: (Node, Pod, Deployment)](self, kind: type[T], name: str) -> T:
         return self.store.get(kind, name)
@@ -45,9 +48,9 @@ class LocalStoreClient:
         return self.store.update_status(obj)
 
     async def delete[T: (Node, Pod, Deployment)](
-        self, kind: type[T], name: str, expected_rv: int | None = None
+        self, kind: type[T], name: str, expected_rv: int | None = None, *, force: bool = False
     ) -> T:
-        gone = self.store.delete(kind, name, expected_rv)
+        gone = self.store.delete(kind, name, expected_rv, force=force)
         if kind is Node:
             self.leases.forget(name)
         return gone
@@ -55,7 +58,13 @@ class LocalStoreClient:
     async def bind(self, pod: str, node: str, expected_rv: int) -> Pod:
         return self.store.bind(pod, node, expected_rv)
 
-    async def register(self, node: str, agent_epoch: str, capacity: Mapping[str, int]) -> Node:
+    async def register(
+        self,
+        node: str,
+        agent_epoch: str,
+        capacity: Mapping[str, int],
+        fencing: FencingConfig | None = None,
+    ) -> RegisterReply:
         """Create the node, or adopt it for a new agent incarnation (ADR-0011).
 
         The new epoch makes heartbeats from any older incarnation fail with
@@ -63,24 +72,28 @@ class LocalStoreClient:
         """
         if not agent_epoch:
             raise EpochMismatch("agent_epoch must be non-empty")
+        f = fencing or FencingConfig()
+        if problem := inequality_violation(
+            f.fence_timeout, f.termination_grace, f.drift_margin, self.eviction_timeout
+        ):
+            raise Invalid(f"Node {node!r}: agent timings rejected: {problem}")
         try:
             current = self.store.get(Node, node)
         except NotFound:
-            created = self.store.create(
+            current = self.store.create(
                 Node(
                     metadata=ObjectMeta(name=node),
                     spec=NodeSpec.model_validate({"capacity": format_resources(capacity)}),
                     status=NodeStatus(agent_epoch=agent_epoch),
                 )
             )
-            self.leases.renew(node)
-            return created
-        current.spec.capacity = dict(capacity)
-        current = self.store.update(current)
-        current.status.agent_epoch = agent_epoch
-        current = self.store.update_status(current)
+        else:
+            current.spec.capacity = dict(capacity)
+            current = self.store.update(current)
+            current.status.agent_epoch = agent_epoch
+            current = self.store.update_status(current)
         self.leases.renew(node)
-        return current
+        return RegisterReply(node=current, eviction_timeout=self.eviction_timeout)
 
     async def heartbeat(self, node: str, agent_epoch: str) -> HeartbeatReply:
         current = self.store.get(Node, node)

@@ -9,7 +9,7 @@ if [ $# -gt 0 ]; then
   git clone --quiet "$1" "$dest/chronos"
 else
   mkdir "$dest/chronos"
-  (cd "$src" && git ls-files -co --exclude-standard -z) | (cd "$src" && xargs -0 tar cf -) \
+  (cd "$src" && git ls-files -co --exclude-standard -z) | (cd "$src" && COPYFILE_DISABLE=1 xargs -0 tar cf -) \
     | tar xf - -C "$dest/chronos"
 fi
 cd "$dest/chronos"

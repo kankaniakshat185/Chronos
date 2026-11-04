@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P2 | — | — |
+| Accepted | 2026-11-05 | P2 | — | — |
 
 ## 1. What
 Each pod runs as **one OS process (and its children) in its own process group**, started, stopped and monitored by the agent of the node it is bound to. "Nodes" are agent processes with a **declared** capacity, usually all on one machine. The runtime sits behind a `Runtime` protocol so Docker could be added later.
@@ -57,6 +57,9 @@ class Runtime(Protocol):
 - **Workload forks and its parent exits:** `killpg` still reaches the children (same group) unless they call `setsid`. Documented limitation.
 - **PID reuse:** pidfile checks are verified against `CHRONOS_POD_UID`.
 - **Zombie processes:** asyncio's child watcher reaps them; the supervisor always awaits `wait()`.
+
+### Implementation status (2026-11-05)
+Implemented: the shim leads each pod's process group (the pod's `status.pid` is the group id); env injection; per-pod logs; pidfiles; stop = SIGTERM → grace → SIGKILL; orphan cleanup before registering, verified with `psutil` against the shim's `--pod-uid`; restart policies with exponential crash backoff (P2.6). `rss_bytes` (memory limits) is Tier 2 (P10.3).
 
 ## 5. Consequences
 **Positive:** real crashes, exit codes, signals, orphans and pauses; fast; no dependencies.

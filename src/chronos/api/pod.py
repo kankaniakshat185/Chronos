@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chronos.api.meta import ObjectMeta
 from chronos.api.resources import ResourceRequirements
+from chronos.api.workload_types import workload_type
 
 
 class RestartPolicy(StrEnum):
@@ -35,6 +36,12 @@ class PodTemplate(BaseModel):
     env: dict[str, str] = {}
     resources: ResourceRequirements = ResourceRequirements()
     restart_policy: RestartPolicy = RestartPolicy.ALWAYS
+    workload_type: str = "generic"  # a registered WorkloadType (X-4)
+
+    @model_validator(mode="after")
+    def _check_workload_type(self) -> Self:
+        workload_type(self.workload_type).validate(self)  # ValueError -> 422
+        return self
 
 
 class PodSpec(PodTemplate):
@@ -52,6 +59,7 @@ class PodStatus(BaseModel):
     exit_code: int | None = None
     restart_count: int = Field(default=0, ge=0)
     ready: bool = False
+    assigned: dict[str, list[str]] = {}  # extended resource -> unit ids (X-5, S12)
 
 
 class Pod(BaseModel):

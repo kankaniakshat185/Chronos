@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from chronos.api.node import NodeCondition
+from chronos.api.node import Node, NodeCondition
 from chronos.api.resources import ResourceMap
 
 
@@ -20,6 +20,16 @@ class BindingRequest(_Body):
 class RegisterRequest(_Body):
     agent_epoch: str
     capacity: ResourceMap = {}
+    # The agent's fencing timings: the server refuses agents that would break
+    # F + K + drift < E against its eviction timeout (ADR-0012).
+    fence_timeout: float = 6.0
+    termination_grace: float = 2.0
+    drift_margin: float = 1.0
+
+
+class RegisterReply(_Body):
+    node: Node
+    eviction_timeout: float  # the shims SIGKILL at once past this lease age
 
 
 class HeartbeatRequest(_Body):

@@ -80,3 +80,37 @@ def test_lint_allows_pure_imports(source: str) -> None:
 def test_lint_catches_gpu_mentions() -> None:
     assert mentions_gpu("capacity['GPU'] = 1")
     assert not mentions_gpu("capacity['chronos.dev/slot'] = 1")
+
+
+# X-8: Stage 1 never needs the GPU toolchain; numba (and numpy) belong to Stage 2's optional
+# dependency group, so importing them from src/ would make an optional group mandatory.
+OPTIONAL_ONLY = frozenset({"numba", "numpy", "cupy"})
+
+
+def optional_imports(source: str) -> list[str]:
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names = [node.module]
+        else:
+            continue
+        found += [name for name in names if name.split(".")[0] in OPTIONAL_ONLY]
+    return found
+
+
+def test_src_never_imports_optional_gpu_dependencies() -> None:
+    offenders = {
+        str(path.relative_to(SRC)): bad
+        for path in SRC.rglob("*.py")
+        if (bad := optional_imports(path.read_text()))
+    }
+    assert offenders == {}
+
+
+def test_optional_import_guard_catches_violations() -> None:
+    assert optional_imports("import numba\nfrom numpy import array\nimport os") == [
+        "numba",
+        "numpy",
+    ]

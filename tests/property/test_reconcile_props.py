@@ -6,6 +6,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from chronos.api import Deployment, DeploymentSpec, ObjectMeta, Pod, PodPhase, PodSpec, PodTemplate
+from chronos.api.pod import TERMINAL_PHASES
 from chronos.core.reconcile import (
     KEEP_FINISHED,
     CreatePod,
@@ -63,7 +64,7 @@ def test_one_round_reaches_the_desired_count(state: tuple[Deployment, list[Pod]]
     d, pods = state
     pods = apply(d, pods, reconcile(d, pods), 1)
     assert sum(is_active(p) for p in pods) == d.spec.replicas
-    assert sum(not is_active(p) for p in pods) <= KEEP_FINISHED
+    assert sum(p.status.phase in TERMINAL_PHASES for p in pods) <= KEEP_FINISHED
 
 
 @given(states())

@@ -11,7 +11,8 @@ from collections.abc import Mapping
 from typing import Protocol
 
 from chronos.api import Deployment, Node, Pod
-from chronos.api.wire import HeartbeatReply
+from chronos.api.wire import HeartbeatReply, RegisterReply
+from chronos.common.config import FencingConfig
 
 
 class StoreClient(Protocol):
@@ -32,13 +33,24 @@ class StoreClient(Protocol):
     async def update_status[T: (Node, Pod, Deployment)](self, obj: T) -> T: ...
 
     async def delete[T: (Node, Pod, Deployment)](
-        self, kind: type[T], name: str, expected_rv: int | None = None
-    ) -> T: ...
+        self, kind: type[T], name: str, expected_rv: int | None = None, *, force: bool = False
+    ) -> T:
+        """Bound, unfinished pods are only marked terminating unless `force` (P4.7)."""
+        ...
 
     async def bind(self, pod: str, node: str, expected_rv: int) -> Pod: ...
 
-    async def register(self, node: str, agent_epoch: str, capacity: Mapping[str, int]) -> Node:
-        """`capacity` is in internal units: cpu in millicores, memory in bytes."""
+    async def register(
+        self,
+        node: str,
+        agent_epoch: str,
+        capacity: Mapping[str, int],
+        fencing: FencingConfig | None = None,
+    ) -> RegisterReply:
+        """`capacity` is in internal units: cpu in millicores, memory in bytes.
+
+        Refused (Invalid) if `fencing` would break F + K + drift < E on this server.
+        """
         ...
 
     async def heartbeat(self, node: str, agent_epoch: str) -> HeartbeatReply: ...

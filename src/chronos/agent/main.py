@@ -7,14 +7,18 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import ValidationError
 
 from chronos import __version__
-from chronos.agent.agent import Agent
+from chronos.agent.agent import Agent, AgentRejected
+from chronos.agent.providers import Providers
 from chronos.agent.runtime import ProcessRuntime
 from chronos.api.quantity import CPU, MEMORY, QuantityError
 from chronos.api.resources import parse_resources
 from chronos.client.http import HttpStoreClient
 from chronos.common.clock import RealClock
+from chronos.common.config import FencingConfig
+from chronos.core.agent_sync import Backoff
 
 app = typer.Typer(help="chronos-agent: the node agent.", no_args_is_help=True, add_completion=False)
 
@@ -45,11 +49,35 @@ def run(
     data_dir: Annotated[Path | None, typer.Option(help="Default: ~/.chronos/agents/NAME")] = None,
     heartbeat_interval: float = 1.0,
     poll_interval: float = 0.5,
+    fence_timeout: Annotated[
+        float,
+        typer.Option(help="Stop all workloads after this long without an accepted heartbeat."),
+    ] = 6.0,
     termination_grace: float = 2.0,
+    drift_margin: float = 1.0,
+    shim_poll: float = 0.1,
+    crash_backoff_base: Annotated[
+        float, typer.Option(help="First restart delay after a crash; doubles per crash.")
+    ] = 1.0,
+    crash_backoff_cap: float = 10.0,
+    crash_backoff_reset: Annotated[
+        float, typer.Option(help="A run this long resets the crash count.")
+    ] = 60.0,
 ) -> None:
     """Register NAME with the control plane and run the pods bound to it."""
     try:
         capacity = parse_capacity(cpu, mem, resource or [])
+        fencing = FencingConfig(
+            heartbeat_interval=heartbeat_interval,
+            fence_timeout=fence_timeout,
+            termination_grace=termination_grace,
+            drift_margin=drift_margin,
+            shim_poll=shim_poll,
+        )
+    except ValidationError as exc:
+        for err in exc.errors():
+            typer.echo(f"chronos-agent: {err['msg'].removeprefix('Value error, ')}", err=True)
+        raise typer.Exit(code=2) from None
     except (QuantityError, ValueError) as exc:
         typer.echo(f"chronos-agent: {exc}", err=True)
         raise typer.Exit(code=2) from None
@@ -61,13 +89,21 @@ def run(
         capacity=capacity,
         client=client,
         runtime=ProcessRuntime(
-            data_dir or Path.home() / ".chronos" / "agents" / name, name, termination_grace
+            data_dir or Path.home() / ".chronos" / "agents" / name,
+            name,
+            fencing,
+            providers=Providers(capacity),
         ),
         clock=RealClock(),
-        heartbeat_interval=heartbeat_interval,
+        fencing=fencing,
         poll_interval=poll_interval,
+        backoff=Backoff(crash_backoff_base, crash_backoff_cap, crash_backoff_reset),
     )
-    asyncio.run(_main(agent, client))
+    try:
+        asyncio.run(_main(agent, client))
+    except AgentRejected as exc:
+        typer.echo(f"chronos-agent: refused by the server: {exc}", err=True)
+        raise typer.Exit(code=2) from None
 
 
 async def _main(agent: Agent, client: HttpStoreClient) -> None:

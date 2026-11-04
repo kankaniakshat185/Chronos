@@ -5,7 +5,16 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from chronos.api import ObjectMeta, Pod, PodPhase, PodSpec, RestartPolicy
-from chronos.core.agent_sync import Forget, LocalProc, Report, Start, Stop, is_desired, plan
+from chronos.core.agent_sync import (
+    Finalize,
+    Forget,
+    LocalProc,
+    Report,
+    Start,
+    Stop,
+    is_desired,
+    plan,
+)
 
 NODE = "n1"
 UIDS = [f"u{i}" for i in range(6)]
@@ -49,6 +58,8 @@ def apply(
                 local.pop(u)
             case Report(pod=p):
                 pods_by_uid[p.metadata.uid] = p
+            case Finalize(name=name):
+                pods_by_uid = {u: p for u, p in pods_by_uid.items() if p.metadata.name != name}
     return list(pods_by_uid.values()), local
 
 
@@ -89,3 +100,16 @@ def test_only_reports_pods_of_this_node_and_changes_only_status(
             assert a.pod.spec == before.spec and a.pod.metadata == before.metadata
             assert a.pod.status != before.status
             assert before.spec.node_name == NODE
+
+
+@given(pods(), procs)
+def test_never_finalizes_a_pod_whose_process_still_runs(
+    pod_list: list[Pod], local: dict[str, LocalProc]
+) -> None:
+    by_name = {p.metadata.name: p for p in pod_list}
+    for a in plan(NODE, pod_list, local):
+        if isinstance(a, Finalize):
+            pod = by_name[a.name]
+            assert pod.metadata.deletion_timestamp is not None and pod.spec.node_name == NODE
+            proc = local.get(pod.metadata.uid)
+            assert proc is None or not proc.running

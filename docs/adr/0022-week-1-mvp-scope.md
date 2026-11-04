@@ -50,26 +50,25 @@ All MVP code lives in the final module layout (PLAN.md §4.6). The MVP-only part
 |----------|-------------------------|---------------------|------------|
 | Polling over the **authoritative** store (no watch) | Level-triggered full recompute each tick | Never unsafe; just unscalable | PM-3 |
 | No expectations / assume cache | Reads aren't cached, so there's no stale-read window | **The moment any controller reads from a cache.** They must ship in the same change as informers. | PM-3 |
-| No fencing / shim | Fault model is crash-stop of the whole node | Partition, pause, or agent-only crash | PM-1 |
+| No fencing / shim | Fault model is crash-stop of the whole node | Partition, pause, or agent-only crash | ~~PM-1~~ paid down (2026-11-05) |
 | No WAL | Documented: restart = total state loss | Any `chronosd` restart | PM-2 |
-| One-phase deletion | Agent stops unknown processes on its next poll | Never unsafe; bounded run window | PM-1 |
-| Crash → replace (no backoff) | Converges | Crash loops churn pods | PM-1 |
-| No workload-type registry / resource providers yet (X-4/X-5) | Only `generic` workloads; extended resources are counted, not assigned | Claims about per-unit assignment, which aren't made | PM-1 |
-| Demo timings without the fencing inequality | No fencing to violate | When fencing lands (validation added in U1.1) | PM-1 |
+| One-phase deletion | Agent stops unknown processes on its next poll | Never unsafe; bounded run window | ~~PM-1~~ paid down (2026-11-05) |
+| Crash → replace (no backoff) | Converges | Crash loops churn pods | ~~PM-1~~ paid down (2026-11-05) |
+| No workload-type registry / resource providers yet (X-4/X-5) | Only `generic` workloads; extended resources are counted, not assigned | Claims about per-unit assignment, which aren't made | ~~PM-1~~ paid down (2026-11-05) |
+| Demo timings without the fencing inequality | No fencing to violate | When fencing lands (validation added in U1.1) | ~~PM-1~~ paid down (2026-11-05) |
 | Extensions in-process only (no plugin loader) | All code is in-tree | A third party needs out-of-tree plugins | Stage 2 entry, if needed (ADR-0023) |
 ### ADR implementation status at `v0.1-mvp`
 | ADR | Status at MVP | What's missing |
 |-----|---------------|----------------|
 | 0001–0004, 0006, 0007 | **Accepted** | — |
-| 0005 | Proposed (partial) | shim, orphan cleanup |
+| 0005, 0010, 0012 | **Accepted** at the end of PM-1 (2026-11-05) | — |
 | 0009 | Proposed (partial) | informer, work queue, expectations, resync |
-| 0010 | Proposed (partial) | watch-based pull (polling now) |
 | 0011 | Proposed (partial) | startup grace, mass-eviction guard |
 | 0013 | Proposed (partial) | assume cache, `MostAllocated` (X-3 registry done) |
 | 0014 | Proposed (partial) | memory-limit enforcement (X-1/X-2 done) |
 | 0017 | Proposed (partial) | `workload_type` validation needs X-4 (PM-1); kind dispatch via X-6 (PM-3) |
-| 0023 | Proposed (partial) | X-1–X-3 and early X-9 done; X-4–X-8 and final X-9 later |
-| 0008, 0012, 0015, 0016 | Proposed | not started |
+| 0023 | Proposed (partial) | X-1–X-5, X-8 and early X-9 done (X-4/X-5/X-8 in PM-1); X-6, X-7 and final X-9 later |
+| 0008, 0015, 0016 | Proposed | not started |
 | 0018 | Deferred (Backlog) | not scheduled |
 | 0019, 0020, 0021 | Deferred – Stage 2 | not scheduled |
 ### Configuration

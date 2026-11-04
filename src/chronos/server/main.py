@@ -28,7 +28,7 @@ app = typer.Typer(
 
 def build(timings: Timings) -> FastAPI:
     clock = RealClock()
-    client = LocalStoreClient(Store(clock), Leases(clock))
+    client = LocalStoreClient(Store(clock), Leases(clock), timings.eviction_timeout)
     lifecycle = NodeLifecycleController(client, clock, timings)
     scheduler = SchedulerController(
         client, clock, resolve(SchedulerConfig()), timings.scheduler_tick

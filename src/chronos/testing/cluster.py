@@ -68,11 +68,18 @@ def kill_node(data_dir: Path) -> None:
 
 @dataclass(frozen=True)
 class Timings:
+    """Fast, but still safe: F + K + drift = 1.0 + 0.5 + 0.2 = 1.7 < E = 2.0 (ADR-0012).
+    F is 5 heartbeats, so a busy CI runner stalling the agent briefly doesn't fence."""
+
     heartbeat_interval: float = 0.2
     node_grace: float = 0.8
     eviction_timeout: float = 2.0
     poll_interval: float = 0.1
-    termination_grace: float = 1.0
+    fence_timeout: float = 1.0
+    termination_grace: float = 0.5
+    drift_margin: float = 0.2
+    crash_backoff_base: float = 0.2
+    crash_backoff_cap: float = 1.6
 
 
 class Cluster:
@@ -114,23 +121,48 @@ class Cluster:
 
         await eventually(healthy, within=15.0)
 
+    async def restart_server(self) -> None:
+        """SIGKILL chronosd and start a new one on the same port (its state is in memory)."""
+        if self._server is not None:
+            self._server.kill()
+            self._server.wait(timeout=5)
+        await self.start()
+
     def agent_dir(self, name: str) -> Path:
         return self.root / "agents" / name
 
     def start_agent(
-        self, name: str, cpu: str = "4", mem: str = "8Gi", resources: dict[str, int] | None = None
+        self,
+        name: str,
+        cpu: str = "4",
+        mem: str = "8Gi",
+        resources: dict[str, int] | None = None,
+        server: str | None = None,  # e.g. through a proxy that a test can cut
     ) -> None:
         t = self.timings
         args = [
             "chronos.agent.main", "run", "--name", name, "--cpu", cpu, "--mem", mem,
-            "--server", self.url, "--data-dir", str(self.agent_dir(name)),
+            "--server", server or self.url, "--data-dir", str(self.agent_dir(name)),
             "--heartbeat-interval", str(t.heartbeat_interval),
             "--poll-interval", str(t.poll_interval),
+            "--fence-timeout", str(t.fence_timeout),
             "--termination-grace", str(t.termination_grace),
+            "--drift-margin", str(t.drift_margin),
+            "--crash-backoff-base", str(t.crash_backoff_base),
+            "--crash-backoff-cap", str(t.crash_backoff_cap),
         ]  # fmt: skip
         for res, units in (resources or {}).items():
             args += ["--resource", f"{res}={units}"]
         self.agents[name] = self._spawn(f"agent-{name}", args)
+
+    def signal_agent(self, name: str, sig: signal.Signals) -> None:
+        os.kill(int((self.agent_dir(name) / "agent.pid").read_text()), sig)
+
+    def signal_pods(self, name: str, sig: signal.Signals) -> None:
+        """Send `sig` to every pod process group (shim + workload) of this node."""
+        for pidfile in (self.agent_dir(name) / "pids").glob("*"):
+            with contextlib.suppress(ProcessLookupError, ValueError):
+                os.killpg(int(pidfile.read_text()), sig)
 
     def kill_node(self, name: str) -> None:
         kill_node(self.agent_dir(name))
@@ -138,10 +170,14 @@ class Cluster:
             proc.wait(timeout=5)
 
     def stop_agent(self, name: str) -> None:
-        """Graceful: SIGTERM, so the agent stops its workloads first."""
+        """Graceful: SIGTERM, so the agent stops its workloads first (SIGKILL if it hangs)."""
         proc = self.agents.pop(name)
         proc.send_signal(signal.SIGTERM)
-        proc.wait(timeout=10)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
 
     def pod_pgids(self) -> list[int]:
         return [
@@ -152,6 +188,10 @@ class Cluster:
 
     async def close(self) -> list[int]:
         """Stop everything; return the process groups of pods still alive (should be [])."""
+        for name in list(self.agents):  # a test may have left some of them SIGSTOPped
+            with contextlib.suppress(OSError, ValueError):
+                self.signal_agent(name, signal.SIGCONT)
+            self.signal_pods(name, signal.SIGCONT)
         for name in list(self.agents):
             self.stop_agent(name)
         if self._server is not None:

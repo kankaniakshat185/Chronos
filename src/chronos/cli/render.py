@@ -51,14 +51,18 @@ def nodes(items: Sequence[Node], now: datetime) -> str:
     return table(headers, rows)
 
 
+def _status(pod: Pod) -> str:
+    return "Terminating" if pod.metadata.deletion_timestamp is not None else pod.status.phase
+
+
 def pods(items: Sequence[Pod], now: datetime, *, wide: bool = False) -> str:
     if not wide:
-        rows = [[p.metadata.name, p.status.phase, age(p.metadata.created_at, now)] for p in items]
+        rows = [[p.metadata.name, _status(p), age(p.metadata.created_at, now)] for p in items]
         return table(["NAME", "STATUS", "AGE"], rows)
     rows = [
         [
             p.metadata.name,
-            p.status.phase,
+            _status(p),
             p.spec.node_name or NONE,
             str(p.status.pid) if p.status.pid else NONE,
             p.status.reason or NONE,

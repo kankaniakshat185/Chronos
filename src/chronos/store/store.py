@@ -136,12 +136,29 @@ class Store:
         return self._commit(new)
 
     def delete[T: (Node, Pod, Deployment)](
-        self, kind: type[T], name: str, expected_rv: int | None = None
+        self, kind: type[T], name: str, expected_rv: int | None = None, *, force: bool = False
     ) -> T:
-        """Removes the object (one-phase deletion in the MVP, ADR-0022)."""
+        """Delete an object (P4.7: two-phase for pods that may have a running process).
+
+        A bound, unfinished pod is only marked: `deletion_timestamp` is set and the pod
+        stays until its agent has stopped the process and deletes it with `force`.
+        Deleting a pod that's already terminating changes nothing. Anything else
+        (unbound or finished pods, other kinds, `force`) is removed at once.
+        """
         current = self._get(kind, name)
         if expected_rv is not None:
             self._check_rv(current, expected_rv)
+        if (
+            isinstance(current, Pod)
+            and not force
+            and current.spec.node_name
+            and current.status.phase not in TERMINAL
+        ):
+            if current.metadata.deletion_timestamp is not None:
+                return self._present(current)  # idempotent: already terminating
+            marked = current.model_copy(deep=True)
+            marked.metadata.deletion_timestamp = self._clock.wall()
+            return self._commit(marked)
         self._revision += 1
         del self._objects[kind.__name__][name]
         if isinstance(current, Pod):

@@ -40,22 +40,30 @@ def deployment(
 
 
 def live_processes(name: str) -> set[int]:
-    """PIDs of live (non-zombie) workload processes of deployment `name` in this session."""
+    """Process groups of live (non-zombie) workloads of deployment `name` in this session.
+
+    A pod's group is led by its shim, so these are the pods' `status.pid` values.
+    """
     label = label_of(name)
-    # -A means "all processes" on both Linux and macOS (Linux's -a skips session leaders,
-    # and every pod process is one).
+    # -A: all processes on both Linux and macOS (Linux's -a skips session leaders, and
+    # every pod's shim is one). -ww: Linux truncates to 80 columns when not on a tty.
     out = subprocess.run(
-        ["ps", "-A", "-o", "pid=,stat=,command="], capture_output=True, text=True, check=True
+        ["ps", "-A", "-ww", "-o", "pid=,pgid=,stat=,command="],
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
-    pids = set()
+    groups = set()
     for line in out.splitlines():
-        pid, stat, *argv = line.split()
+        _pid, pgid, stat, *argv = line.split()
         if stat.startswith("Z") or "chronos.testing.workload" not in argv:
             continue
+        if "chronos.shim" in argv:
+            continue  # the shim's own command line also mentions the workload
         i = argv.index("--label") if "--label" in argv else -1
         if 0 <= i < len(argv) - 1 and argv[i + 1] == label:
-            pids.add(int(pid))
-    return pids
+            groups.add(int(pgid))
+    return groups
 
 
 async def wait_nodes_ready(api: HttpStoreClient, *names: str) -> None:

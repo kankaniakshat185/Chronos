@@ -87,6 +87,9 @@ Either way, framework and core code don't change.
 - A provider raising in `allocate` → the pod is reported `Failed(ProviderError)`; no process starts.
 - Agent restart → providers rebuild their state from the pods they restart (orphans were already killed).
 
+### Implementation status (2026-11-05)
+Done: X-1, X-2, X-3 (MVP), X-4, X-5, X-8 (PM-1), early X-9. Deviations from the sketch above: the WorkloadType registry is `chronos/api/workload_types.py`, not `agent/`, because templates are validated wherever they're parsed (API 422, `chronosctl`, agent); providers take the pod **uid** (`allocate(uid, n)`, `release(uid)`) because release happens on process exit, when only the uid is at hand; providers are registered as **factories** `(resource, capacity) -> provider`, because a provider needs the node's capacity, which isn't known at import time. Remaining: X-6 (PM-3), X-7 (PM-4/PM-6), final X-9 (PM-9b).
+
 ## 5. Consequences
 **Positive:** Stage 2 becomes a checklist (PHASE2-EXTENSION-POINTS.md); GPU tests become instantiations of existing invariants; the seams are small enough to explain in a minute.
 **Negative / accepted costs:** extra seam work spread across Stage 1; one more level of indirection in four places; no out-of-tree extensions.

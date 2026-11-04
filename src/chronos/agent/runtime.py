@@ -1,10 +1,13 @@
-"""Runs pods as real OS processes (ADR-0005; MVP: no shim yet, ADR-0022).
+"""Runs pods as real OS processes, each under `chronos-shim` (ADR-0005, ADR-0012).
 
-Each pod's command runs in its own session, so its pid is also its process-group
-id and a stop reaches the whole group. Files under the agent's data dir:
+The shim starts in its own session, so its pid is the pod's process-group id, and
+the workload is its child in the same group: a stop reaches the whole group, and the
+shim fences the workload by itself if the agent's lease goes stale. Files under the
+agent's data dir:
 
     agent.pid               the agent's own pid
-    pids/<pod uid>          the pod's process-group id, removed once reaped
+    lease                   monotonic send time of the last accepted heartbeat
+    pids/<pod uid>          the pod's process-group id (the shim's pid), removed once reaped
     pods/<pod uid>/stdout.log, stderr.log
 """
 
@@ -15,11 +18,20 @@ import contextlib
 import logging
 import os
 import signal
+import sys
 from collections.abc import Coroutine
+from dataclasses import replace
 from pathlib import Path
 
+import psutil
+
+from chronos.agent.providers import Providers
 from chronos.api import Pod
+from chronos.api.workload_types import workload_type
+from chronos.common.clock import Clock, RealClock
+from chronos.common.config import FencingConfig
 from chronos.core.agent_sync import LocalProc
+from chronos.core.fencing import FENCED_EXIT_CODE
 
 log = logging.getLogger(__name__)
 
@@ -28,49 +40,120 @@ EXIT_NOT_STARTABLE = 127
 
 
 class ProcessRuntime:
-    def __init__(self, data_dir: Path, node_name: str, termination_grace: float) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        node_name: str,
+        fencing: FencingConfig,
+        clock: Clock | None = None,
+        providers: Providers | None = None,
+    ) -> None:
+        self._clock = clock or RealClock()
+        self._providers = providers or Providers({})
         self._dir = data_dir
         self._node = node_name
-        self._grace = termination_grace
+        self._fencing = fencing
+        self._grace = fencing.termination_grace
+        self.eviction_timeout: float | None = None  # from the server, set at registration
+        self.lease = data_dir / "lease"
         self._procs: dict[str, LocalProc] = {}
         self._handles: dict[str, asyncio.subprocess.Process] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping: set[str] = set()
+        self._fenced: set[str] = set()
         (data_dir / "pids").mkdir(parents=True, exist_ok=True)
         (data_dir / "pods").mkdir(parents=True, exist_ok=True)
         (data_dir / "agent.pid").write_text(str(os.getpid()))
 
+    def cleanup_orphans(self) -> list[int]:
+        """Kill pod process groups left by an earlier agent on this data dir (P2.7).
+
+        Run before registering. A pidfile is trusted only if its process is still a
+        `chronos.shim` for that pod uid: after a reboot or PID reuse, the number may
+        belong to an unrelated process, which must not be touched.
+        """
+        killed = []
+        for pidfile in sorted((self._dir / "pids").glob("*")):
+            uid = pidfile.name
+            try:
+                pgid = int(pidfile.read_text())
+                argv = psutil.Process(pgid).cmdline()
+            except (ValueError, psutil.Error):
+                argv = []  # unreadable, or the process is gone
+            if "chronos.shim" in argv and uid in argv:
+                _killpg(pgid, signal.SIGKILL)
+                killed.append(pgid)
+                log.warning("orphan cleanup: killed pod %s (process group %d)", uid, pgid)
+            pidfile.unlink(missing_ok=True)
+        return killed
+
+    def write_lease(self, last_ok_send: float) -> None:
+        """Atomically (write + rename): a shim never reads a half-written lease."""
+        tmp = self.lease.with_suffix(".tmp")
+        tmp.write_text(repr(last_ok_send))
+        os.replace(tmp, self.lease)
+
     def snapshot(self) -> dict[str, LocalProc]:
         return dict(self._procs)
 
-    async def start(self, pod: Pod) -> None:
+    async def start(self, pod: Pod, *, restarts: int = 0, crashes: int = 0) -> None:
+        """Start the pod under its shim. Raises ProviderError (nothing started) if the
+        node can't supply its extended-resource units."""
         uid, name = pod.metadata.uid, pod.metadata.name
         logs = self._dir / "pods" / uid
         logs.mkdir(parents=True, exist_ok=True)
+        command, type_env = workload_type(pod.spec.workload_type).prepare(pod)  # X-4
+        assigned, unit_env = self._providers.allocate(uid, pod.requests)  # X-5
         env = {
             **os.environ,
             **pod.spec.env,
+            **type_env,
+            **unit_env,
             "CHRONOS_POD_UID": uid,
             "CHRONOS_POD_NAME": name,
             "CHRONOS_NODE_NAME": self._node,
         }
+        if self.eviction_timeout is None:
+            raise RuntimeError("start() before registration: eviction timeout unknown")
+        f = self._fencing
+        argv = [
+            sys.executable, "-m", "chronos.shim",
+            "--lease", str(self.lease), "--pod-uid", uid,
+            "--fence-timeout", str(f.fence_timeout),
+            "--eviction-timeout", str(self.eviction_timeout),
+            "--grace", str(f.termination_grace), "--poll", str(f.shim_poll),
+            "--", *command,
+        ]  # fmt: skip
         try:
             with (logs / "stdout.log").open("ab") as out, (logs / "stderr.log").open("ab") as err:
                 proc = await asyncio.create_subprocess_exec(
-                    *pod.spec.command, env=env, stdout=out, stderr=err, start_new_session=True
+                    *argv, env=env, stdout=out, stderr=err, start_new_session=True
                 )
         except OSError as exc:  # missing binary, permission denied, ...
             log.warning("pod %s: can't start %s: %s", name, pod.spec.command, exc)
-            self._procs[uid] = LocalProc(uid, name, pid=0, exit_code=EXIT_NOT_STARTABLE)
+            self._providers.release(uid)
+            now = self._clock.monotonic()
+            self._procs[uid] = LocalProc(
+                uid, name, 0, EXIT_NOT_STARTABLE, now, now, restarts, crashes
+            )
             return
         self._pidfile(uid).write_text(str(proc.pid))
         self._handles[uid] = proc
-        self._procs[uid] = LocalProc(uid, name, pid=proc.pid)
+        self._procs[uid] = LocalProc(
+            uid, name, proc.pid, started_at=self._clock.monotonic(), restarts=restarts,
+            crashes=crashes, assigned=assigned,
+        )  # fmt: skip
         self._spawn(self._wait(uid, proc))
         log.info("pod %s: started pid %d", name, proc.pid)
 
-    def stop(self, uid: str) -> None:
-        """SIGTERM the group, SIGKILL it after the grace period. Returns at once."""
+    def stop(self, uid: str, *, fenced: bool = False) -> None:
+        """SIGTERM the group, SIGKILL it after the grace period. Returns at once.
+
+        `fenced`: record the exit as FENCED_EXIT_CODE (not a crash), so the pod is
+        started again, not failed, once the agent leaves Fenced mode.
+        """
+        if fenced:
+            self._fenced.add(uid)
         if uid in self._handles and uid not in self._stopping:
             self._stopping.add(uid)
             self._spawn(self._stop(uid, self._handles[uid]))
@@ -97,10 +180,15 @@ class ProcessRuntime:
 
     async def _wait(self, uid: str, proc: asyncio.subprocess.Process) -> None:
         code = await proc.wait()
+        self._providers.release(uid)  # S12: units are free once the process is gone
+        if uid in self._fenced:
+            self._fenced.discard(uid)
+            code = FENCED_EXIT_CODE
         self._pidfile(uid).unlink(missing_ok=True)
         self._handles.pop(uid, None)
-        if (current := self._procs.get(uid)) is not None:
-            self._procs[uid] = LocalProc(uid, current.pod_name, current.pid, exit_code=code)
+        current = self._procs.get(uid)
+        if current is not None and current.pid == proc.pid:  # not already restarted
+            self._procs[uid] = replace(current, exit_code=code, exited_at=self._clock.monotonic())
         log.info("pod %s: pid %d exited with %d", uid, proc.pid, code)
 
     def _pidfile(self, uid: str) -> Path:

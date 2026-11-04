@@ -29,6 +29,7 @@ class ModelPod:
     env: dict[str, str] = field(default_factory=dict)
     message: str = ""
     node_name: str = ""
+    terminating: bool = False
 
 
 class StoreModel(RuleBasedStateMachine):
@@ -79,6 +80,8 @@ class StoreModel(RuleBasedStateMachine):
     @rule(name=NAMES, offset=RV_OFFSET, value=st.sampled_from(["x", "y"]))
     def update_spec(self, name: str, offset: int, value: str) -> None:
         expected = self._expect_write(name, offset)
+        if expected is None and self.pods[name].terminating:
+            expected = Invalid  # a terminating pod's spec is frozen
         pod = Pod(metadata=ObjectMeta(name=name), spec=PodSpec(command=["true"]))
         if name in self.pods:
             pod = self.store.get(Pod, name)
@@ -113,17 +116,27 @@ class StoreModel(RuleBasedStateMachine):
             m.message = ""  # bind clears a stale reason/message (e.g. Unschedulable)
             self.bound_uids[m.uid] = node
 
-    @rule(name=NAMES, offset=st.one_of(st.none(), RV_OFFSET))
-    def delete(self, name: str, offset: int | None) -> None:
+    @rule(name=NAMES, offset=st.one_of(st.none(), RV_OFFSET), force=st.booleans())
+    def delete(self, name: str, offset: int | None, force: bool) -> None:
         expected = self._expect_write(name, offset or 0)
         rv = None if offset is None or name not in self.pods else self.pods[name].rv + offset
         before = self.store.revision
         if expected is not None:
             with pytest.raises(expected):
-                self.store.delete(Pod, name, expected_rv=rv)
+                self.store.delete(Pod, name, expected_rv=rv, force=force)
             assert self.store.revision == before
             return
-        self.store.delete(Pod, name, expected_rv=rv)
+        result = self.store.delete(Pod, name, expected_rv=rv, force=force)
+        m = self.pods[name]
+        if m.node_name and not force:  # two-phase: only marked (P4.7)
+            if m.terminating:
+                assert self.store.revision == before  # idempotent
+            else:
+                assert self.store.revision == before + 1
+                self.revision += 1
+                m.terminating, m.rv = True, self.revision
+            assert result.metadata.deletion_timestamp is not None
+            return
         assert self.store.revision == before + 1
         self.revision += 1
         del self.pods[name]
@@ -142,6 +155,7 @@ class StoreModel(RuleBasedStateMachine):
             assert pod.spec.env == m.env
             assert pod.status.message == m.message
             assert pod.spec.node_name == m.node_name
+            assert (pod.metadata.deletion_timestamp is not None) == m.terminating
 
     @invariant()
     def bound_pods_never_move(self) -> None:  # S1

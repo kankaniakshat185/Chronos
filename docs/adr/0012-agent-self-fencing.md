@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P4 | — | — |
+| Accepted | 2026-11-05 | P4 | — | — |
 
 ## 1. What
 A node whose lease with the control plane has expired **kills its own workloads before the control plane can evict and replace them**. The lease is measured from the **send time** of the last acknowledged heartbeat. It's enforced by two independent parties: the **agent**, and a tiny **`chronos-shim`** wrapping each workload. The shim watches a lease file and enforces fencing even if the agent itself is dead. Config validation guarantees `fence_timeout + termination_grace + drift_margin < eviction_timeout`.
@@ -104,6 +104,9 @@ Replacements are created only after eviction, so old and new instances never ove
 - **Control plane down longer than F (accepted, Option A):** every agent and shim fences, so **all workloads stop**. Agents can't distinguish this from a partition, so this is the safe outcome. When the control plane returns, startup grace prevents evictions; agents heartbeat, leave Fenced mode and restart the pods still bound to them (new PIDs). Real Kubernetes differs here: the kubelet keeps pods running while the API server is down.
 - **Whole-node freeze:** see the bound above.
 - **Agent restarted with a new epoch while shims are running:** orphan cleanup kills the old shims; fresh pods start only for pods still bound to this node.
+
+### Implementation status (2026-11-05)
+Implemented as described: `core/fencing.py`, `shim/__main__.py` (run as `python -m chronos.shim`), the agent's heartbeat, fence-watch and sync loops, and registration-time validation of F + K + drift < E (the server returns E, which the shims use). Deviations: the fence watch is its own loop (the heartbeat loop can sit in a register retry while the server is down); a stop caused by fencing is recorded as `FENCED_EXIT_CODE` (86) so the pod is restarted, not failed, after the agent leaves Fenced mode; when the lease is past E the shim SIGKILLs its whole process group, itself included. Integration tests cover agent pause, agent `kill -9`, a cut partition (a minimal TCP proxy; the full fault proxy is PM-6), a whole-node freeze (about 65 ms window measured) and a short pause that must not fence. Still to come: the sim and chaos canaries (PM-4, PM-6) and the control-plane outage path (U2.2, PM-2).
 
 ## 5. Consequences
 **Positive:** a precise, provable safety property (S3, S4) that holds even when the agent dies; a strong interview topic (leases, send-time rule, clock assumptions, shims, fencing tokens).

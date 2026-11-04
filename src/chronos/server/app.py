@@ -19,6 +19,7 @@ from chronos.api import Deployment, Node, Pod
 from chronos.api.kinds import PLURALS
 from chronos.api.wire import BindingRequest, ErrorBody, HeartbeatRequest, RegisterRequest
 from chronos.client.local import LocalStoreClient
+from chronos.common.config import FencingConfig
 from chronos.store import Invalid, StoreError
 
 PREFIX = "/api/v1"
@@ -94,7 +95,12 @@ def create_app(client: LocalStoreClient, loops: list[Loop] | None = None) -> Fas
     @app.post(PREFIX + "/nodes/{name}/register")
     async def register(name: str, request: Request) -> JSONResponse:
         body = await _parse(request, RegisterRequest)
-        return _json(await client.register(name, body.agent_epoch, body.capacity))
+        fencing = FencingConfig.model_construct(  # timings checked against E in register()
+            fence_timeout=body.fence_timeout,
+            termination_grace=body.termination_grace,
+            drift_margin=body.drift_margin,
+        )
+        return _json(await client.register(name, body.agent_epoch, body.capacity, fencing))
 
     @app.post(PREFIX + "/nodes/{name}/heartbeat")
     async def heartbeat(name: str, request: Request) -> JSONResponse:
@@ -131,8 +137,10 @@ def _add_kind_routes[T: (Node, Pod, Deployment)](
     async def update_status(name: str, request: Request) -> JSONResponse:
         return _json(await client.update_status(await parse_named(request, name)))
 
-    async def delete(name: str, resource_version: int | None = None) -> JSONResponse:
-        return _json(await client.delete(kind, name, resource_version))
+    async def delete(
+        name: str, resource_version: int | None = None, force: bool = False
+    ) -> JSONResponse:
+        return _json(await client.delete(kind, name, resource_version, force=force))
 
     app.add_api_route(base, list_objects, methods=["GET"])
     app.add_api_route(base, create, methods=["POST"])
