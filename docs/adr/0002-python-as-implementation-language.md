@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P0 | — | — |
+| Accepted | 2026-10-21 | P0 | — | — |
 
 ## 1. What
 All of Chronos (control plane, node agent, CLI, simulator, test harnesses) is written in **Python 3.12**, fully type-annotated and checked with `mypy --strict`.

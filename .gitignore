@@ -2,3 +2,15 @@ docs/DOCUMENTATION.md
 docs/PHASE2-EXTENSION-POINTS.md
 docs/PLAN.md
 docs/TESTING.md
+docs/TASKS.md
+# Python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+dist/

@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P0 | — | — |
+| Accepted | 2026-10-21 | P0 | — | — |
 
 ## 1. What
 Every significant design decision in Chronos is recorded as an Architecture Decision Record in `docs/adr/`, using the eight-section template ([template.md](template.md)): What, Why, Alternatives, How, Consequences, Verification, Revisit when, References.

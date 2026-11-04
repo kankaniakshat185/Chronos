@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P0 | — | — |
+| Accepted | 2026-10-21 | P0 | — | — |
 
 ## 1. What
 All decision logic lives in **pure functions** in `chronos.core` that take state, desired state, `now` and config, and return a list of **actions**. The **shell** (controllers, agent, server) does all I/O and executes those actions. **Time is always injected** through a `Clock` protocol; nothing reads the system clock directly.
