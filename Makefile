@@ -1,4 +1,4 @@
-.PHONY: lint type test test-nightly check
+.PHONY: lint type test test-nightly check demo-cluster
 
 lint:
 	uv run ruff check .
@@ -15,3 +15,7 @@ test-nightly:
 	HYPOTHESIS_PROFILE=nightly uv run pytest --timeout=0 tests/property
 
 check: lint type test
+
+# The demo cluster: chronosd + plain-1, slot-a, slot-b (Ctrl-C to stop).
+demo-cluster:
+	scripts/demo-cluster.sh

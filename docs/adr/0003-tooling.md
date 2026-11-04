@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P0 | — | — |
+| Accepted | 2026-11-04 | P0 | — | — |
 
 ## 1. What
 Use **uv** for environments and dependencies, **ruff** for lint and format, **mypy --strict** for types, **pytest + Hypothesis** (with pytest-asyncio, pytest-timeout, pytest-xdist, coverage) for tests, **pre-commit** for local hooks, and **GitHub Actions** (Ubuntu + macOS) for CI.

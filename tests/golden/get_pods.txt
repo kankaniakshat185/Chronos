@@ -1,0 +1,5 @@
+NAME              STATUS    AGE
+slot-demo-b7c2m   Running   3h
+slot-demo-q8n4z   Running   3h
+slot-demo-t5v3w   Pending   3h
+web-k2x9p         Running   3h

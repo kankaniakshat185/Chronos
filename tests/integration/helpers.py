@@ -1,5 +1,6 @@
 """Helpers shared by the integration tests."""
 
+import secrets
 import subprocess
 import sys
 
@@ -7,6 +8,14 @@ from chronos.api import Deployment, Node, NodeCondition, Pod, PodPhase
 from chronos.client import HttpStoreClient
 from chronos.store import Conflict
 from chronos.testing.cluster import eventually
+
+# Per test session, so live_processes() never counts another cluster's workloads
+# (e.g. a demo cluster running on the same machine, or another xdist worker).
+SESSION = secrets.token_hex(3)
+
+
+def label_of(name: str) -> str:
+    return f"{name}.{SESSION}"
 
 
 def workload_command(label: str) -> list[str]:
@@ -22,7 +31,7 @@ def deployment(
             "spec": {
                 "replicas": replicas,
                 "template": {
-                    "command": workload_command(name),
+                    "command": workload_command(label_of(name)),
                     "resources": {"requests": requests or {"cpu": "100m", "memory": "64Mi"}},
                 },
             },
@@ -30,10 +39,13 @@ def deployment(
     )
 
 
-def live_processes(label: str) -> set[int]:
-    """PIDs of live (non-zombie) workload processes started with `--label <label>`."""
+def live_processes(name: str) -> set[int]:
+    """PIDs of live (non-zombie) workload processes of deployment `name` in this session."""
+    label = label_of(name)
+    # -A means "all processes" on both Linux and macOS (Linux's -a skips session leaders,
+    # and every pod process is one).
     out = subprocess.run(
-        ["ps", "-axo", "pid=,stat=,command="], capture_output=True, text=True, check=True
+        ["ps", "-A", "-o", "pid=,stat=,command="], capture_output=True, text=True, check=True
     ).stdout
     pids = set()
     for line in out.splitlines():

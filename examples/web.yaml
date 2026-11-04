@@ -1,0 +1,10 @@
+# A plain web-like deployment: 3 replicas of the test workload, CPU and memory only.
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3
+  template:
+    command: [python, -m, chronos.testing.workload, --label, web]
+    resources:
+      requests: {cpu: 250m, memory: 64Mi}

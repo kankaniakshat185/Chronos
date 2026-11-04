@@ -1,0 +1,11 @@
+# Each replica needs one chronos.dev/slot: an extended resource, so a whole-unit, hard
+# constraint. Only slot-a and slot-b advertise one each, so the third replica waits.
+kind: Deployment
+metadata:
+  name: slot-demo
+spec:
+  replicas: 3
+  template:
+    command: [python, -m, chronos.testing.workload, --label, slot-demo]
+    resources:
+      requests: {cpu: 500m, memory: 128Mi, chronos.dev/slot: 1}

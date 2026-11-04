@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed (→ Accepted at `v0.1-mvp`; → Deprecated at end of PM-3; → Superseded at Stage 1 exit) | 2026-10-24 (revised 2026-11-04) | Stage 1, Part A | — | — |
+| Accepted (2026-11-04, `v0.1-mvp`; → Deprecated at end of PM-3; → Superseded at Stage 1 exit) | 2026-10-24 (revised 2026-11-04) | Stage 1, Part A | — | — |
 
 > **Revised 2026-11-04:** the plan was split into Stage 1 (Orchestration) and Stage 2 (GPU/CUDA, deferred). The MVP now demonstrates the hard-constraint rule with a generic extended resource (`chronos.dev/slot`) instead of a simulated GPU. The original one-week framing is retired; the plan now defines order and scope only, with no hour estimates.
 
@@ -44,7 +44,7 @@ The MVP was originally framed as a short slice for an internship-interview demo.
 
 ## 4. How
 ### Components & files
-All MVP code lives in the final module layout (PLAN.md §4.6). The MVP-only shells are `controllers/*_loop.py` (polling) and `agent/poll.py`, deleted in PM-3 (U3.1).
+All MVP code lives in the final module layout (PLAN.md §4.6). The MVP-only parts are the polling `run()`/`tick()` loops in `controllers/deployment.py`, `controllers/scheduler.py`, `controllers/node_lifecycle.py` and the sync loop in `agent/agent.py`; PM-3 (U3.1) replaces them with informers and watches while the pure `core/*` functions stay unchanged.
 ### Mechanism: the shortcuts and why each is safe *for now*
 | Shortcut | Why it's safe in the MVP | Becomes unsafe when | Removed in |
 |----------|-------------------------|---------------------|------------|

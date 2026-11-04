@@ -1,0 +1,4 @@
+NAME      STATUS   CPU      MEMORY      CHRONOS.DEV/SLOT   AGE
+plain-1   Ready    500m/4   128Mi/8Gi   —                  3h
+slot-a    Ready    500m/4   128Mi/8Gi   1/1                3h
+slot-b    Ready    500m/4   128Mi/8Gi   1/1                3h

@@ -171,3 +171,24 @@ class Cluster:
 
     def logs(self) -> str:
         return "\n".join(f"==> {p.name}\n{p.read_text()}" for p in sorted(self.root.glob("*.log")))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m chronos.testing.cluster kill-node DATA_DIR`: what scripts/kill-node.sh runs."""
+    import argparse  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(prog="chronos.testing.cluster")
+    sub = parser.add_subparsers(dest="command", required=True)
+    kill = sub.add_parser("kill-node", help="crash-stop a node: SIGKILL its agent and pods")
+    kill.add_argument("data_dir", type=Path)
+    args = parser.parse_args(argv)
+    if not (args.data_dir / "agent.pid").exists():
+        print(f"no agent.pid in {args.data_dir}", file=sys.stderr)
+        return 1
+    kill_node(args.data_dir)
+    print(f"killed agent and pods of {args.data_dir.name}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

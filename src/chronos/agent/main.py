@@ -54,6 +54,7 @@ def run(
         typer.echo(f"chronos-agent: {exc}", err=True)
         raise typer.Exit(code=2) from None
     logging.basicConfig(level=logging.INFO, format=f"%(asctime)s {name} %(name)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # not one line per request
     client = HttpStoreClient(server, heartbeat_timeout=heartbeat_interval * 0.8)
     agent = Agent(
         name=name,

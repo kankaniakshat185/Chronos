@@ -1,0 +1,5 @@
+NAME              STATUS    NODE      PID    REASON          AGE   MESSAGE
+slot-demo-b7c2m   Running   slot-a    4102   —               3h
+slot-demo-q8n4z   Running   slot-b    4103   —               3h
+slot-demo-t5v3w   Pending   —         —      Unschedulable   3h    0/3 nodes available: Insufficient chronos.dev/slot (3/3 nodes)
+web-k2x9p         Running   plain-1   4101   —               3h

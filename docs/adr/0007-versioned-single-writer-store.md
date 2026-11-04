@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P1 | — | — |
+| Accepted | 2026-11-04 | P1 | — | — |
 
 ## 1. What
 Cluster state lives in one `Store` that applies mutations **one at a time**, stamps each with a **global, strictly increasing revision**, and accepts updates only as **compare-and-swap** on the object's `resource_version`. Spec and status are written through separate operations, and structural invariants (immutable `uid`, bind-once `node_name`, node capacity) are enforced inside the store's transaction.

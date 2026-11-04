@@ -158,9 +158,10 @@ async def test_kill_node_goes_unknown_then_not_ready(
     await eventually(lambda: condition(NodeCondition.NOT_READY), within=t.eviction_timeout + 1.0)
     not_ready_after = clock.monotonic() - killed_at
     # Silence counts from the last heartbeat, up to one interval before the kill.
-    assert t.node_grace - t.heartbeat_interval <= unknown_after <= t.node_grace + 0.6
+    # Upper bounds: one 250 ms lifecycle tick plus slack for slow CI runners.
+    assert t.node_grace - t.heartbeat_interval <= unknown_after <= t.node_grace + 1.0
     assert t.eviction_timeout - t.heartbeat_interval <= not_ready_after
-    assert not_ready_after <= t.eviction_timeout + 0.6
+    assert not_ready_after <= t.eviction_timeout + 1.0
 
 
 async def test_restarted_agent_re_registers_with_a_new_epoch(

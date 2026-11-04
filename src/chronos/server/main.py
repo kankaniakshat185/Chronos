@@ -57,6 +57,7 @@ def run(
         typer.echo(f"chronosd: invalid timings: {exc}", err=True)
         raise typer.Exit(code=2) from None
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # not one line per request
     uvicorn.run(build(timings), host=host, port=port, log_level="warning")
 
 
