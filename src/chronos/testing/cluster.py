@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+import psutil
 
 from chronos.common.clock import RealClock
 
@@ -46,13 +47,25 @@ async def eventually[T](
 
 
 def alive(pgid: int) -> bool:
+    """Does any non-zombie process of this process group still exist?
+
+    A process that has exited but not been reaped (a zombie: e.g. a shim whose parent
+    agent is SIGSTOPped) runs nothing, so it doesn't count. Linux reports such a group
+    to `killpg(pgid, 0)` as existing; macOS doesn't, so check explicitly.
+    """
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    return True
+    for proc in psutil.process_iter(["status"]):
+        try:
+            if os.getpgid(proc.pid) == pgid and proc.info["status"] != psutil.STATUS_ZOMBIE:
+                return True
+        except (ProcessLookupError, psutil.Error):
+            continue
+    return False
 
 
 def kill_node(data_dir: Path) -> None:
