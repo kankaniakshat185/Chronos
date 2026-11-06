@@ -71,6 +71,9 @@ Config validation refuses to start if the constraints are violated.
 - **Agent restarts quickly (< grace):** the new epoch replaces the old; the old pods are gone locally (orphan cleanup) and the agent reports the missing processes; the deployment controller replaces them.
 - **Network flaps:** Ready ↔ Unknown oscillation only affects scheduling, never eviction.
 
+### Implementation status (2026-11-06)
+Implemented: the heartbeat endpoint with epochs, the pure `condition()` function, the lifecycle controller (250 ms tick, CAS transitions), revoking the epoch on NotReady, level-triggered eviction, and **startup grace**: leases live in memory and start empty at boot, so every node's silence is measured from when the restarted server first sees it, and none is NotReady earlier than `eviction_timeout` after a restart (tested by U2.2 (b)). Not yet: the mass-eviction guard.
+
 ## 5. Consequences
 **Positive:** simple, bounded, explainable; the latency-vs-false-positive tradeoff is measured (B3).
 **Negative / accepted costs:** fixed timeouts don't adapt; detection ≥ 4 s and eviction ≥ 10 s by default (tests use smaller values).

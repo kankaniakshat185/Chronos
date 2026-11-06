@@ -17,7 +17,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-uv run chronosd run --port "$CHRONOS_PORT" --heartbeat-interval "$HEARTBEAT" \
+uv run chronosd run --port "$CHRONOS_PORT" --data-dir "$CHRONOS_DEMO_DIR/server" \
+  --heartbeat-interval "$HEARTBEAT" \
   --node-grace "$NODE_GRACE" --eviction-timeout "$EVICTION" &
 pids+=($!)
 for _ in $(seq 100); do

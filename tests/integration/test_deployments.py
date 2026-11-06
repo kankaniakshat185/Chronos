@@ -5,7 +5,7 @@ import itertools
 
 import pytest
 
-from chronos.api import Deployment, Node, Pod, PodPhase, RestartPolicy
+from chronos.api import Deployment, Pod, PodPhase, RestartPolicy
 from chronos.client import HttpStoreClient
 from chronos.common.clock import RealClock
 from chronos.testing.cluster import Cluster, eventually
@@ -131,23 +131,3 @@ async def test_node_loss_replaces_pods_without_exceeding_replicas(
     assert recovered_after <= t.eviction_timeout + 3.0
     lost = [p for p in await owned_pods(api, "web") if p.status.reason == "NodeLost"]
     assert [p.spec.node_name for p in lost] == ["a"]
-
-
-async def test_control_plane_restart_loses_state_and_agents_stop_workloads(
-    cluster: Cluster, api: HttpStoreClient
-) -> None:
-    """Pins down README limitation #1 (no durability) until PM-2 changes it on purpose:
-    after a chronosd restart the agent re-registers, finds no pods, and stops its work."""
-    cluster.start_agent("a")
-    await wait_nodes_ready(api, "a")
-    await api.create(deployment("web", 2))
-    await wait_running(api, "web", 2)
-
-    await cluster.restart_server()
-
-    async def stopped_and_back() -> bool:
-        nodes = (await api.list(Node))[0]
-        return [n.metadata.name for n in nodes] == ["a"] and not live_processes("web")
-
-    await eventually(stopped_and_back)
-    assert (await api.list(Deployment))[0] == []

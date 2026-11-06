@@ -24,7 +24,7 @@ All ADRs start as **Proposed** (drafted during planning, 2026-10-21). They becom
 | [0012](0012-agent-self-fencing.md) | Self-fencing (agent + per-pod shim) to bound duplicates during partitions | Accepted | P4 |
 | [0013](0013-filter-score-scheduler.md) | Filter/score scheduler with atomic binding | Proposed (amended 2026-11-04) | P3, MVP |
 | [0014](0014-resource-model.md) | Resource model: an integer resource map (millicores, bytes, extended units), request-based | Proposed (amended 2026-11-04) | P0/P3, MVP |
-| [0015](0015-wal-and-snapshots.md) | Persistence via WAL with CRC framing and snapshots | Proposed | P6 |
+| [0015](0015-wal-and-snapshots.md) | Persistence via WAL with CRC framing and snapshots | Accepted | P6 |
 | [0016](0016-deterministic-simulation-testing.md) | Deterministic simulation testing | Proposed | P5 |
 | [0017](0017-manifest-format.md) | Own YAML manifest schema validated by Pydantic | Proposed (amended 2026-11-04) | P1 |
 | [0018](0018-control-plane-high-availability.md) | Control-plane high availability | Deferred (Backlog, not scheduled) | Backlog |

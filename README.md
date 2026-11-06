@@ -13,9 +13,10 @@ level-triggered reconciliation. Workloads are real OS processes.
 > means the workload waits. Every one of those statements is backed by a property-based or
 > real-process test.
 
-**Status: `v0.1-mvp` + PM-1 (self-fencing).** The core loop works end to end, and workloads
-are fenced when their node loses contact with the control plane, so a paused, crashed or
-partitioned node can't cause duplicate replicas. The
+**Status: `v0.1-mvp` + PM-1 (self-fencing) + PM-2 (durability).** The core loop works end to
+end; workloads are fenced when their node loses contact with the control plane, so a paused,
+crashed or partitioned node can't cause duplicate replicas; and every acknowledged write is on
+disk before it's acknowledged, so a `chronosd` crash loses nothing. The
 [limitations](#limitations-what-chronos-does-not-do-yet) are listed below, each with the block
 that fixes it, plus the [design limitations](#design-limitations-deliberate) that stay.
 
@@ -63,7 +64,7 @@ fresh copy of the repo with `scripts/fresh-clone-check.sh`.
 flowchart LR
     subgraph CP["chronosd (one process)"]
         API["API server (FastAPI)"]
-        STORE[("Versioned store<br/>in memory (no WAL yet)")]
+        STORE[("Versioned store<br/>in memory + WAL and snapshots on disk")]
         DC["Deployment controller"]
         SCH["Scheduler"]
         NLC["Node lifecycle controller<br/>(+ eviction)"]
@@ -87,6 +88,11 @@ flowchart LR
 - **One store holds the truth.** Every write bumps a global revision and is a compare-and-swap
   on the object's `resource_version`, so a stale writer gets `409 Conflict` instead of
   silently overwriting ([ADR-0007](docs/adr/0007-versioned-single-writer-store.md)).
+- **Durable before acknowledged.** Each write is one CRC-framed record in a write-ahead log,
+  synced to disk (`F_FULLFSYNC` on macOS) before memory changes and before the client hears
+  back; snapshots bound recovery time. On restart a write torn by the crash is cut off, and
+  any other damage stops the server from starting rather than silently losing data
+  ([ADR-0015](docs/adr/0015-wal-and-snapshots.md)).
 - **Functional core, imperative shell.** Scheduling, reconciliation, node health and agent
   sync are pure functions in `src/chronos/core/` with no I/O or clock access; the loops around
   them are thin ([ADR-0006](docs/adr/0006-functional-core-imperative-shell.md)). That is what
@@ -101,9 +107,8 @@ flowchart LR
   `eviction_timeout` E, and both sides refuse timings unless F + K + drift < E, so old and new
   never overlap ([ADR-0012](docs/adr/0012-agent-self-fencing.md)).
 
-**Remaining MVP shortcuts** ([ADR-0022](docs/adr/0022-week-1-mvp-scope.md)): controllers poll
-the store instead of watching it, and state is in memory only. Each has a scheduled fix,
-listed under Limitations.
+**Remaining MVP shortcut** ([ADR-0022](docs/adr/0022-week-1-mvp-scope.md)): controllers and
+agents poll instead of watching. Its fix (PM-3) is listed under Limitations.
 
 ## What is guaranteed, and how it's tested
 
@@ -120,7 +125,9 @@ listed under Limitations.
 | **L3** a pending pod that fits somewhere gets placed | ✅ | [scheduler properties](tests/property/test_schedule_props.py), [demo scenario, step 8](tests/integration/test_demo_scenario.py) |
 | **L5** no processes left behind after delete or teardown | ✅ | [integration](tests/integration/test_deployments.py); every integration test fails if a pod process outlives its cluster ([fixture](tests/integration/conftest.py)) |
 | **S12** no unit of an extended resource is held by two live pods | ✅ | [provider property](tests/property/test_providers_props.py), [integration](tests/integration/test_scheduling.py) |
-| **S6, S7, S8, L4** | ❌ not yet | watch, rollouts, durability: see Limitations |
+| **S8** an acknowledged write survives a control-plane crash; nothing half-written is applied | ✅ | [crash at 7 crash points x 50 seeds, recover, compare with a reference run](tests/durability/test_crash_recovery.py) (`make test-durability`); [recovery from every truncation offset, bit flips, disk full, restart equivalence](tests/property/test_wal_props.py) |
+| **L4** the cluster reconverges after a control-plane restart | ✅ | [back within F: same PIDs; down longer: everything fenced, then the same pods restart on their nodes; crash mid scale-up: exactly 20 pods](tests/integration/test_control_plane_restart.py) |
+| **S6, S7** | ❌ not yet | watch, rollouts: see Limitations |
 
 **Modularity:** a resource that exists only in test code, `example.com/widget`, plus a
 test-only scheduler plugin, pass the scheduling and bind properties with no production-code
@@ -129,32 +136,32 @@ workload type and resource provider run a real process through the unchanged age
 ([`test_seams.py`](tests/integration/test_seams.py)).
 
 **How the tests are layered:** unit tests, Hypothesis property and stateful tests (100 examples
-locally, 1 000 in CI, 20 000 with `make test-nightly`), and integration tests that run a real
-`chronosd` and agents as subprocesses. CI runs everything on Ubuntu and macOS.
+locally, 1 000 in CI, 20 000 with `make test-nightly`), integration tests that run a real
+`chronosd` and agents as subprocesses, and a durability harness that crashes the store at
+every crash point and checks what recovery gives back. CI runs everything on Ubuntu and macOS.
 
 ## Limitations: what Chronos does not do yet
 
 > **What this does NOT do yet.** Each item names the planned fix. PM-1 closed the items
-> about fencing, crash backoff and one-phase deletion.
+> about fencing, crash backoff and one-phase deletion; PM-2 closed durability.
 
-1. **No durability.** All cluster state is in memory. Restarting `chronosd` loses every Deployment, Pod and Node. Agents re-register, find no desired state, and stop their workloads. → WAL + snapshots, PM-2 ([ADR-0015](docs/adr/0015-wal-and-snapshots.md)).
-3. **No chaos testing or deterministic simulation.** Fault testing is limited to scripted integration tests (whole-node kill, agent pause and crash, a cut partition, a whole-node freeze). There are no randomized fault schedules, network partitions, delays or message loss, and no canary bugs proving test strength. → PM-4 (simulator), PM-6 (chaos harness).
-4. **No GPU/CUDA support: planned, Stage 2 (deferred).** Nothing detects or uses GPUs, and no CUDA runs. Stage 1 provides the seams GPU support plugs into: extended resources (X-1/X-2), workload types (X-4) and resource providers (X-5), proven in-process by PX.9 ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)).
-5. **Polling, not watch.** Controllers poll the store every 250 ms and agents poll every 500 ms; this is O(cluster) per tick. It's correct (level-triggered) but not scalable, and not measured beyond 3 nodes. → watch + informers + work queue + expectations, PM-3.
-7. **No resource isolation or enforcement.** CPU, memory and extended-resource requests are used for *placement accounting only*; a process can use more than it requested. → memory-limit enforcement PM-9a (P10.3); CPU stays advisory (ADR-0014).
-8. **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → Backlog (P11.x, ADR-0018); not scheduled.
-9. **No benchmarks.** Timings visible in the demo are a single run on a laptop, not measured distributions. → B1–B6, PM-6.
-10. **No jobs / run-to-completion workloads: planned, Stage 2 (deferred)** (ADR-0020). Only long-running Deployments. The kind registry (X-6, PM-3) makes Jobs purely additive later.
-12. **Scheduling policy is basic.** `LeastAllocated` only. → `MostAllocated`, PM-5. Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
-13. **No auth, TLS or multi-tenancy.** It's built for a trusted localhost. (Non-goal.)
-14. **Extensions are in-process only.** There's no plugin loader; new resources, workload types and providers are registered by in-tree code. (Conscious limit, ADR-0023; a loader may be added at the start of Stage 2 if needed.)
-15. **No metrics or dashboards.** There's no `/metrics` endpoint, Prometheus or Grafana yet; observe the cluster with `chronosctl get`. → PM-5 (P7.4, P7.6, [ADR-0024](docs/adr/0024-prometheus-grafana-observability.md)).
+1. **No chaos testing or deterministic simulation.** Fault testing is limited to scripted integration tests (whole-node kill, agent pause and crash, a cut partition, a whole-node freeze). There are no randomized fault schedules, network partitions, delays or message loss, and no canary bugs proving test strength. → PM-4 (simulator), PM-6 (chaos harness).
+2. **No GPU/CUDA support: planned, Stage 2 (deferred).** Nothing detects or uses GPUs, and no CUDA runs. Stage 1 provides the seams GPU support plugs into: extended resources (X-1/X-2), workload types (X-4) and resource providers (X-5), proven in-process by PX.9 ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)).
+3. **Polling, not watch.** Controllers poll the store every 250 ms and agents poll every 500 ms; this is O(cluster) per tick. It's correct (level-triggered) but not scalable, and not measured beyond 3 nodes. → watch + informers + work queue + expectations, PM-3.
+4. **No resource isolation or enforcement.** CPU, memory and extended-resource requests are used for *placement accounting only*; a process can use more than it requested. → memory-limit enforcement PM-9a (P10.3); CPU stays advisory (ADR-0014).
+5. **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → Backlog (P11.x, ADR-0018); not scheduled.
+6. **No benchmarks.** Timings visible in the demo are a single run on a laptop, not measured distributions. → B1–B6, PM-6.
+7. **No jobs / run-to-completion workloads: planned, Stage 2 (deferred)** (ADR-0020). Only long-running Deployments. The kind registry (X-6, PM-3) makes Jobs purely additive later.
+8. **Scheduling policy is basic.** `LeastAllocated` only. → `MostAllocated`, PM-5. Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
+9. **No auth, TLS or multi-tenancy.** It's built for a trusted localhost. (Non-goal.)
+10. **Extensions are in-process only.** There's no plugin loader; new resources, workload types and providers are registered by in-tree code. (Conscious limit, ADR-0023; a loader may be added at the start of Stage 2 if needed.)
+11. **No metrics or dashboards.** There's no `/metrics` endpoint, Prometheus or Grafana yet; observe the cluster with `chronosctl get`. → PM-5 (P7.4, P7.6, [ADR-0024](docs/adr/0024-prometheus-grafana-observability.md)).
 
 ## Design limitations (deliberate)
 
 These stay true at the end of Stage 1; they are trade-offs, not missing work.
 
-1. **A control-plane outage longer than `fence_timeout` stops every workload (fencing Option A).** Agents can't tell a dead control plane from a partition, so they fence. This trades availability for safety (no duplicates). Real Kubernetes keeps pods running while the API server is down; Chronos deliberately doesn't. When the control plane returns, startup grace prevents evictions and agents restart their still-bound pods (L4). A smarter fencing rule (e.g. peer checks) was rejected as too complex; the real fix is control-plane HA, which is in the Backlog (P11.x, ADR-0018). *Today the return path isn't there yet: state is in memory, so a restarted control plane has forgotten everything (limitation 1); startup grace and this test arrive with PM-2.*
+1. **A control-plane outage longer than `fence_timeout` stops every workload (fencing Option A).** Agents can't tell a dead control plane from a partition, so they fence. This trades availability for safety (no duplicates). Real Kubernetes keeps pods running while the API server is down; Chronos deliberately doesn't. When the control plane returns, startup grace prevents evictions and agents restart their still-bound pods (L4). A smarter fencing rule (e.g. peer checks) was rejected as too complex; the real fix is control-plane HA, which is in the Backlog (P11.x, ADR-0018). Tested by U2.2 (b) ([`test_long_outage_fences_everything_then_reconverges`](tests/integration/test_control_plane_restart.py)).
 2. **"No duplicate replicas" (S3/S4) is scoped to agent pause, agent crash and network partition.** For a **whole-node freeze** (a VM pause that stops the shims too), there's a bounded window of **at most one shim poll (100 ms)** after the node resumes, during which a stale workload may run alongside its replacement before the shim SIGKILLs it. Kubernetes has the same limit. The README must not claim "no duplicates under any pause".
 3. **Fencing assumes the node's monotonic clock keeps advancing across a freeze.** That holds for Chronos's single-host setup (all "nodes" share the host clock). On real VMs it depends on the hypervisor's clock handling; if the guest clock stalled, the window in #2 could extend up to `fence_timeout`.
 
@@ -165,7 +172,7 @@ The block names used above, in build order:
 | Block | What it adds |
 |-------|--------------|
 | **PM-1** ✅ | Self-fencing (agent + per-pod shim), restart with backoff, orphan cleanup, two-phase deletion, workload-type and resource-provider seams |
-| **PM-2** | Durability: write-ahead log with CRC framing, snapshots, crash-point-tested recovery |
+| **PM-2** ✅ | Durability: write-ahead log with CRC framing, snapshots, crash-point-tested recovery |
 | **PM-3** | Watch + informers + work queue + expectations, replacing polling |
 | **PM-4** | Deterministic simulation with canary bugs |
 | **PM-5** | Full CLI, structured logs, events, `/metrics`, Prometheus + Grafana |
@@ -179,7 +186,7 @@ The block names used above, in build order:
 src/chronos/
   api/          Pydantic models, the resource map and quantity parsing
   core/         pure logic: schedule, reconcile, node_health, agent_sync
-  store/        versioned store, validation, errors, heartbeat leases
+  store/        versioned store, WAL + snapshots + recovery, validation, heartbeat leases
   server/       FastAPI app and the chronosd entry point
   controllers/  deployment, scheduler, node lifecycle (polling loops)
   client/       StoreClient protocol, local and HTTP clients

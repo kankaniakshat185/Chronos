@@ -7,29 +7,50 @@ gets `Conflict` instead of silently erasing someone else's write (S5). Failed
 writes change nothing, revision included.
 
 This is the synchronous core: no `await`, so a single caller is a single writer.
-The server wraps it in an async façade that serializes calls (Day 3). Objects are
+The server wraps it in an async façade that serializes calls. Objects are
 deep-copied on the way in and out, so callers can never mutate stored state.
+
+Durability (ADR-0015): with a WAL, every change becomes one record (`put` of the whole
+object, or `delete`) that is written and synced *before* memory changes, so an
+acknowledged write survives a crash (S8). `Store.open()` rebuilds the state from the
+newest snapshot plus the records after it, through the same `_apply_*` functions the
+live path uses.
 """
 
 from __future__ import annotations
 
 import builtins
+import logging
 import uuid
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 from chronos.api import Deployment, Node, NodeCondition, Pod, PodPhase
 from chronos.api.kinds import Obj
 from chronos.api.resources import add, insufficient, sub
 from chronos.common.clock import Clock
-from chronos.store.errors import AlreadyExists, Conflict, InsufficientCapacity, Invalid, NotFound
+from chronos.store.codec import Record
+from chronos.store.errors import (
+    AlreadyExists,
+    Conflict,
+    InsufficientCapacity,
+    Invalid,
+    NotFound,
+    Unavailable,
+)
 from chronos.store.validation import (
     TERMINAL,
     validate_create,
     validate_spec_update,
     validate_status_update,
 )
+from chronos.store.wal import DEFAULT_SEGMENT_SIZE, Snapshot, Wal, recover
+
+log = logging.getLogger(__name__)
 
 KINDS: tuple[type[Obj], ...] = (Node, Pod, Deployment)
+MODELS: dict[str, type[Obj]] = {kind.__name__: kind for kind in KINDS}
+DEFAULT_SNAPSHOT_EVERY = 5_000
 
 UNBOUND = ""
 
@@ -39,13 +60,63 @@ def _new_uid() -> str:
 
 
 class Store:
-    def __init__(self, clock: Clock, uid_factory: Callable[[], str] = _new_uid) -> None:
+    def __init__(
+        self,
+        clock: Clock,
+        uid_factory: Callable[[], str] = _new_uid,
+        *,
+        wal: Wal | None = None,
+        snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
+    ) -> None:
         self._clock = clock
         self._new_uid = uid_factory
         self._revision = 0
         self._objects: dict[str, dict[str, Obj]] = {kind.__name__: {} for kind in KINDS}
         # Secondary index: node name -> names of pods bound to it ("" = unbound).
         self._pods_by_node: dict[str, set[str]] = {}
+        self._wal = wal
+        self._snapshot_every = snapshot_every
+        self._since_snapshot = 0
+
+    @classmethod
+    def open(
+        cls,
+        data_dir: Path,
+        clock: Clock,
+        *,
+        sync: bool = True,
+        segment_size: int = DEFAULT_SEGMENT_SIZE,
+        snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
+        uid_factory: Callable[[], str] = _new_uid,
+    ) -> Store:
+        """Recover the state in `data_dir` (created if missing) and keep logging there.
+
+        Raises WalCorrupt if the log is damaged anywhere but a torn final record.
+        """
+        data_dir.mkdir(parents=True, exist_ok=True)
+        found = recover(data_dir)
+        store = cls(clock, uid_factory, snapshot_every=snapshot_every)
+        if found.snapshot is not None:
+            for kind, obj in found.snapshot.objects:
+                store._apply_put(MODELS[kind].model_validate(obj))
+            store._revision = found.snapshot.revision
+        for record in found.records:
+            store._apply(record)
+        store._wal = Wal(data_dir, store._revision + 1, sync=sync, segment_size=segment_size)
+        log.info(
+            "recovered revision %d (snapshot %s + %d records%s)",
+            store._revision,
+            found.snapshot.revision if found.snapshot else "none",
+            len(found.records),
+            f", torn tail cut at {found.truncated[0]}:{found.truncated[1]}"
+            if found.truncated
+            else "",
+        )
+        return store
+
+    def close(self) -> None:
+        if self._wal is not None:
+            self._wal.close()
 
     @property
     def revision(self) -> int:
@@ -102,8 +173,6 @@ class Store:
         new.metadata.generation = 1
         new.metadata.created_at = self._clock.wall()
         new.metadata.deletion_timestamp = None
-        if isinstance(new, Pod):
-            self._pods_by_node.setdefault(UNBOUND, set()).add(name)
         return self._commit(new)
 
     def update[T: (Node, Pod, Deployment)](self, obj: T) -> T:
@@ -159,12 +228,11 @@ class Store:
             marked = current.model_copy(deep=True)
             marked.metadata.deletion_timestamp = self._clock.wall()
             return self._commit(marked)
-        self._revision += 1
-        del self._objects[kind.__name__][name]
-        if isinstance(current, Pod):
-            self._pods_by_node[current.spec.node_name].discard(name)
         gone = current.model_copy(deep=True)
-        gone.metadata.resource_version = self._revision
+        gone.metadata.resource_version = self._log(
+            Record(self._revision + 1, "delete", kind.__name__, name)
+        )
+        self._apply_delete(kind.__name__, name)
         return gone
 
     def bind(self, pod_name: str, node_name: str, expected_rv: int) -> Pod:
@@ -193,8 +261,6 @@ class Store:
         new.spec.node_name = node_name
         new.status.phase = PodPhase.BOUND
         new.status.reason, new.status.message = "", ""  # e.g. a stale "Unschedulable"
-        self._pods_by_node[UNBOUND].discard(pod_name)
-        self._pods_by_node.setdefault(node_name, set()).add(pod_name)
         return self._commit(new)
 
     # ---- internals -----------------------------------------------------------
@@ -218,10 +284,68 @@ class Store:
 
     def _commit[T: (Node, Pod, Deployment)](self, new: T) -> T:
         """The only place a stored object is replaced. All checks happen before it."""
-        self._revision += 1
-        new.metadata.resource_version = self._revision
-        self._objects[new.kind][new.metadata.name] = new
+        new.metadata.resource_version = self._revision + 1
+        self._log(
+            Record(
+                new.metadata.resource_version,
+                "put",
+                new.kind,
+                new.metadata.name,
+                new.model_dump(mode="json"),
+            )
+        )
+        self._apply_put(new)
         return self._present(new)
+
+    def _log(self, record: Record) -> int:
+        """Make the change durable (if there's a WAL) before memory changes."""
+        if self._wal is not None:
+            try:
+                self._wal.append(record)
+            except OSError as exc:  # e.g. disk full: nothing was applied
+                raise Unavailable(f"WAL write failed: {exc}") from exc
+        return record.rev
+
+    def _apply(self, record: Record) -> None:
+        if record.op == "delete":
+            self._apply_delete(record.kind, record.name)
+        else:
+            self._apply_put(MODELS[record.kind].model_validate(record.obj))
+        self._revision = record.rev
+
+    def _apply_put(self, obj: Obj) -> None:
+        name = obj.metadata.name
+        old = self._objects[obj.kind].get(name)
+        if isinstance(old, Pod):
+            self._pods_by_node[old.spec.node_name].discard(name)
+        if isinstance(obj, Pod):
+            self._pods_by_node.setdefault(obj.spec.node_name, set()).add(name)
+        self._objects[obj.kind][name] = obj
+        self._revision = obj.metadata.resource_version
+        self._after_write()
+
+    def _apply_delete(self, kind: str, name: str) -> None:
+        old = self._objects[kind].pop(name)
+        if isinstance(old, Pod):
+            self._pods_by_node[old.spec.node_name].discard(name)
+        self._revision += 1
+        self._after_write()
+
+    def _after_write(self) -> None:
+        if self._wal is None:
+            return
+        self._since_snapshot += 1
+        if self._since_snapshot >= self._snapshot_every:
+            self._since_snapshot = 0
+            self._wal.snapshot(self.snapshot())
+
+    def snapshot(self) -> Snapshot:
+        objects = [
+            (kind, obj.model_dump(mode="json"))
+            for kind, by_name in self._objects.items()
+            for _, obj in sorted(by_name.items())
+        ]
+        return Snapshot(self._revision, objects)
 
     def _present[T: (Node, Pod, Deployment)](self, obj: T) -> T:
         out = obj.model_copy(deep=True)

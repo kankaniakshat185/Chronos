@@ -119,6 +119,7 @@ class Cluster:
             "chronosd",
             [
                 "chronos.server.main", "run", "--port", str(self.port),
+                "--data-dir", str(self.root / "server"),
                 "--heartbeat-interval", str(t.heartbeat_interval),
                 "--node-grace", str(t.node_grace),
                 "--eviction-timeout", str(t.eviction_timeout),
@@ -134,11 +135,16 @@ class Cluster:
 
         await eventually(healthy, within=15.0)
 
-    async def restart_server(self) -> None:
-        """SIGKILL chronosd and start a new one on the same port (its state is in memory)."""
+    def kill_server(self) -> None:
+        """SIGKILL chronosd, like a crash: no shutdown, no flushing."""
         if self._server is not None:
             self._server.kill()
             self._server.wait(timeout=5)
+            self._server = None
+
+    async def restart_server(self) -> None:
+        """Crash chronosd and start a new one on the same port and data dir."""
+        self.kill_server()
         await self.start()
 
     def agent_dir(self, name: str) -> Path:

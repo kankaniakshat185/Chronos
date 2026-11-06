@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P6 | — | — |
+| Accepted | 2026-11-06 | P6 | — | — |
 
 ## 1. What
 Every store mutation is appended to a **write-ahead log** and **fsynced before it is applied in memory or acknowledged**. Records are length-prefixed with a CRC. Periodic **atomic snapshots** bound recovery time. Recovery **truncates a torn final record** but **refuses to start on corruption anywhere else**.
@@ -82,6 +82,9 @@ Snapshot content is a consistent copy taken under the store lock (serialization 
 - **Crash between fsync and apply:** the record is durable but unacked → it's applied on recovery. That's fine: the client got no ack and must re-read (at-least-once visible, never lost).
 - **Crash during snapshot:** the `.tmp` file is ignored on recovery; the old snapshot + WAL are still complete.
 - **Clock/term:** not used for ordering; revisions are the only order.
+
+### Implementation status (2026-11-06)
+Implemented: `store/codec.py` (the record format above), `store/wal.py` (segments, `durable_sync` with `F_FULLFSYNC` on macOS, atomic snapshots keeping the newest two, recovery with torn-tail truncation and refusal on any other corruption or a revision gap), `common/crashpoint.py` (the six points above plus `wal.torn_write`, which writes half a frame and exits), `Store.open()` and `chronosd run --data-dir`, and `chronosd wal-verify` (report only; it never truncates). A failed append raises `Unavailable` with memory untouched. Deviations: **group commit (P6.2) is deferred to the PM-6 benchmarks (B5)**: with one synchronous writer every write is synced on its own (about 3 ms with `F_FULLFSYNC` on this Mac), which is enough at Stage 1's scale, and B5 is where per-write vs batched syncing gets measured. Snapshots are written synchronously by the writer (small state; revisit with B6). The `ack_before_fsync` canary belongs to the simulator (PM-4): a process crash can't lose page-cache data, so only a modelled power loss can catch a missing fsync. Verification: 7 crash points x 50 seeds (`make test-durability`), recovery from every truncation offset, bit flips, disk full, restart equivalence, and the control-plane restart integration tests (U2.2).
 
 ## 5. Consequences
 **Positive:** crash safety with a precise contract; the recovery path runs in every chaos run; a direct "what I did differently from Strata" story.
