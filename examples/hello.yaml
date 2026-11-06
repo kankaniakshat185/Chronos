@@ -1,0 +1,9 @@
+# The smallest thing to run: one pod, no deployment. It prints a line and keeps running.
+# chronosctl apply -f examples/hello.yaml && chronosctl logs hello
+kind: Pod
+metadata:
+  name: hello
+spec:
+  command: [python, -m, chronos.testing.workload, --label, hello]
+  resources:
+    requests: {cpu: 100m, memory: 32Mi}

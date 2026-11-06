@@ -15,7 +15,9 @@ import contextlib
 from collections.abc import AsyncIterator, Callable, Coroutine
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST
+from prometheus_client.registry import Collector
 from pydantic import BaseModel, ValidationError
 
 from chronos.api import ApiObject
@@ -23,6 +25,7 @@ from chronos.api.wire import BindingRequest, ErrorBody, HeartbeatRequest, Regist
 from chronos.client.local import LocalStoreClient
 from chronos.client.protocol import WATCH_TIMEOUT
 from chronos.common.config import FencingConfig
+from chronos.common.metrics import render
 from chronos.store import Invalid, StoreError
 from chronos.store.kinds import KINDS
 
@@ -64,8 +67,11 @@ def _parse_labels(raw: str | None) -> dict[str, str] | None:
     return labels
 
 
-def create_app(client: LocalStoreClient, loops: list[Loop] | None = None) -> FastAPI:
-    """`loops` are the controllers' run() coroutines, started with the server."""
+def create_app(
+    client: LocalStoreClient, loops: list[Loop] | None = None, metrics: Collector | None = None
+) -> FastAPI:
+    """`loops` are the controllers' run() coroutines, started with the server; `metrics`
+    adds cluster-state gauges to `/metrics` (ADR-0024)."""
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -87,6 +93,11 @@ def create_app(client: LocalStoreClient, loops: list[Loop] | None = None) -> Fas
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/metrics")
+    async def metrics_endpoint() -> Response:
+        body = render(*([metrics] if metrics is not None else []))
+        return Response(body, media_type=CONTENT_TYPE_LATEST)
 
     for kind in KINDS.values():
         _add_kind_routes(app, client, kind.model, kind.plural)

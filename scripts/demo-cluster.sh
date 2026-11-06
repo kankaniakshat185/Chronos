@@ -17,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-uv run chronosd run --port "$CHRONOS_PORT" --data-dir "$CHRONOS_DEMO_DIR/server" \
+uv run chronosd run --host "$CHRONOS_BIND" --port "$CHRONOS_PORT" --data-dir "$CHRONOS_DEMO_DIR/server" \
   --heartbeat-interval "$HEARTBEAT" \
   --node-grace "$NODE_GRACE" --eviction-timeout "$EVICTION" &
 pids+=($!)
@@ -27,8 +27,19 @@ for _ in $(seq 100); do
 done
 curl -sf "$CHRONOS_SERVER/healthz" >/dev/null || { echo "chronosd didn't start" >&2; exit 1; }
 
-scripts/start-agent.sh plain-1 & pids+=($!)
-scripts/start-agent.sh slot-a --resource chronos.dev/slot=1 & pids+=($!)
-scripts/start-agent.sh slot-b --resource chronos.dev/slot=1 & pids+=($!)
+metrics() { echo --metrics-port "$((METRICS_PORT_BASE + $1))" --metrics-host "$CHRONOS_BIND"; }
+scripts/start-agent.sh plain-1 $(metrics 0) & pids+=($!)
+scripts/start-agent.sh slot-a --resource chronos.dev/slot=1 $(metrics 1) & pids+=($!)
+scripts/start-agent.sh slot-b --resource chronos.dev/slot=1 $(metrics 2) & pids+=($!)
+
+# Where Prometheus finds us (make observability); harmless if it isn't running.
+cat > "$TARGETS_FILE" <<JSON
+[
+  {"targets": ["$SCRAPE_HOST:$CHRONOS_PORT"], "labels": {"component": "chronosd"}},
+  {"targets": ["$SCRAPE_HOST:$METRICS_PORT_BASE", "$SCRAPE_HOST:$((METRICS_PORT_BASE + 1))",
+               "$SCRAPE_HOST:$((METRICS_PORT_BASE + 2))"], "labels": {"component": "agent"}}
+]
+JSON
 echo "chronosd on $CHRONOS_SERVER, agents plain-1 slot-a slot-b, data in $CHRONOS_DEMO_DIR"
+echo "metrics: $CHRONOS_SERVER/metrics and agents on :$METRICS_PORT_BASE-$((METRICS_PORT_BASE + 2)); dashboards: make observability"
 wait

@@ -1,0 +1,13 @@
+# A workload that exits with code 3 after 2 s. With restart_policy Always it's restarted
+# in place with growing back-off: watch `chronosctl get pods -o wide` show
+# CrashLoopBackOff, and `chronosctl describe pod <name>` count the BackOff events.
+kind: Deployment
+metadata:
+  name: crashy
+spec:
+  replicas: 1
+  template:
+    command: [python, -m, chronos.testing.workload, --label, crashy, --crash-after, "2", --exit-code, "3"]
+    restart_policy: Always
+    resources:
+      requests: {cpu: 100m, memory: 32Mi}

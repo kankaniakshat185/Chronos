@@ -29,13 +29,15 @@ from collections.abc import Awaitable, Callable, Mapping
 
 from chronos.agent.providers import ProviderError
 from chronos.agent.runtime import ProcessRuntime
-from chronos.api import Pod, PodPhase
+from chronos.api import Node, ObjectMeta, Pod, PodPhase
+from chronos.client.events import EventRecorder
 from chronos.client.protocol import StoreClient
 from chronos.common.backoff import full_jitter
 from chronos.common.clock import Clock
 from chronos.common.config import FencingConfig
+from chronos.common.metrics import AGENT_FENCE_EVENTS, AGENT_HEARTBEAT_FAILURES
 from chronos.controllers.runtime import Informer, Signal
-from chronos.core.agent_sync import Backoff, Finalize, Forget, Report, Start, Stop, plan
+from chronos.core.agent_sync import CRASH_LOOP, Backoff, Finalize, Forget, Report, Start, Stop, plan
 from chronos.core.fencing import should_fence
 from chronos.store import Invalid, NotFound, StoreError
 from chronos.store.errors import EpochMismatch, Unavailable
@@ -77,6 +79,9 @@ class Agent:
         self._backoff = backoff or Backoff()
         self._rng = rng or random.Random()
         self._new_epoch = new_epoch
+        self.events = EventRecorder(client, clock, f"agent/{name}")
+        self.stats: dict[str, int] = {}  # for /metrics (read on another thread)
+        self._fenced_at = 0.0
         self.pods = Informer(
             client, Pod, clock, node_name=name, watch_wait=watch_wait, rng=self._rng
         )
@@ -136,6 +141,7 @@ class Agent:
             await self.register()
             return
         except StoreError as exc:  # Unavailable, timeouts: keep beating
+            AGENT_HEARTBEAT_FAILURES.inc()
             log.warning("heartbeat failed: %s", exc)
             return
         self._accepted(sent)
@@ -147,6 +153,8 @@ class Agent:
         )
         if stale and not self.fenced:
             self.fenced = True
+            self._fenced_at = self._clock.monotonic()
+            AGENT_FENCE_EVENTS.inc()
             log.warning("no accepted heartbeat for %.1fs: Fenced, stopping all workloads",
                         self._clock.monotonic() - self.last_ok_send)  # fmt: skip
             for uid, proc in self._runtime.snapshot().items():
@@ -155,6 +163,12 @@ class Agent:
         elif not stale and self.fenced:
             self.fenced = False
             log.info("heartbeat accepted again: leaving Fenced")
+            # Recorded now: while fenced, the control plane was unreachable by definition.
+            took = self._clock.monotonic() - self._fenced_at
+            node = Node(metadata=ObjectMeta(name=self.name))
+            await self.events.record(
+                node, "Fenced", f"stopped all workloads; fenced for {took:.1f}s", "Warning"
+            )
 
     async def _caught_up_with_registration(self) -> bool:
         """A new epoch means the server may have evicted everything the old one ran, and
@@ -177,30 +191,47 @@ class Agent:
             return
         pods = self.pods.list()
         await self.fence_check()  # never start anything on a stale lease
+        procs = self._runtime.snapshot()
+        running = sum(p.running for p in procs.values())
+        self.stats = {"running": running, "exited": len(procs) - running}  # replaced, not mutated
         now = self._clock.monotonic()
         for action in plan(self.name, pods, self._runtime.snapshot(), now, self._backoff):
             match action:
                 case Start(pod=pod, restarts=restarts, crashes=crashes) if not self.fenced:
-                    try:
-                        await self._runtime.start(pod, restarts=restarts, crashes=crashes)
-                    except ProviderError as exc:
-                        await self._fail(pod, "ProviderError", str(exc))
+                    await self._start(pod, restarts, crashes)
                 case Stop(uid=uid):
                     self._runtime.stop(uid)
                 case Forget(uid=uid):
                     self._runtime.forget(uid)
                 case Finalize(name=name, resource_version=rv):
-                    try:
-                        await self._client.delete(Pod, name, expected_rv=rv, force=True)
-                    except StoreError as exc:  # changed meanwhile: next tick recomputes
-                        log.info("pod %s: final delete deferred: %s", name, exc)
+                    await self._finalize(name, rv)
                 case Report(pod=pod) if not self.fenced:
-                    try:
-                        await self._client.update_status(pod)
-                    except StoreError as exc:  # Conflict, NotFound: next tick recomputes
-                        log.info("pod %s: status not written: %s", pod.metadata.name, exc)
+                    await self._report(pod)
                 case _:
                     pass  # Fenced: start and report nothing
+
+    async def _start(self, pod: Pod, restarts: int, crashes: int) -> None:
+        try:
+            await self._runtime.start(pod, restarts=restarts, crashes=crashes)
+        except ProviderError as exc:
+            await self._fail(pod, "ProviderError", str(exc))
+            return
+        await self.events.record(pod, "Started", f"on {self.name}")
+
+    async def _finalize(self, name: str, rv: int) -> None:
+        try:
+            await self._client.delete(Pod, name, expected_rv=rv, force=True)
+        except StoreError as exc:  # changed meanwhile: the next sync recomputes
+            log.info("pod %s: final delete deferred: %s", name, exc)
+
+    async def _report(self, pod: Pod) -> None:
+        try:
+            await self._client.update_status(pod)
+        except StoreError as exc:  # Conflict, NotFound: the next sync recomputes
+            log.info("pod %s: status not written: %s", pod.metadata.name, exc)
+            return
+        if pod.status.reason == CRASH_LOOP:
+            await self.events.record(pod, "BackOff", pod.status.message, "Warning")
 
     async def _fail(self, pod: Pod, reason: str, message: str) -> None:
         log.warning("pod %s: %s: %s", pod.metadata.name, reason, message)

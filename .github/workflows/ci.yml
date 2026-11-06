@@ -46,3 +46,18 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run pytest -n auto -q tests/sim
+
+  # Prometheus + Grafana against a real 3-node cluster (ADR-0024). Ubuntu only: no Docker
+  # on the macOS runners. CHRONOS_BIND=0.0.0.0 so the containers can reach the host.
+  observability-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: docker compose -f deploy/observability/docker-compose.yml up -d
+      - run: CHRONOS_BIND=0.0.0.0 uv run pytest -m observability -v tests/integration/test_observability.py
+      - if: failure()
+        run: docker compose -f deploy/observability/docker-compose.yml logs

@@ -174,7 +174,18 @@ def least_allocated(pod: Pod, node: NodeInfo) -> int:
     return sum(scores) // len(scores)
 
 
+def most_allocated(pod: Pod, node: NodeInfo) -> int:
+    """Pack: the more cpu/memory already used after placing the pod, the higher the score."""
+    after = add(node.allocated, pod.requests)
+    scores = [
+        100 * min(after.get(r, 0), cap) // cap if (cap := node.capacity.get(r, 0)) else 0
+        for r in (CPU, MEMORY)
+    ]
+    return sum(scores) // len(scores)
+
+
 register_filter("NodeReady", node_ready)
 register_filter("NodeSchedulable", node_schedulable)
 register_filter("FitsResources", fits_resources)
 register_score("LeastAllocated", least_allocated)
+register_score("MostAllocated", most_allocated)

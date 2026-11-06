@@ -1,4 +1,4 @@
-.PHONY: lint type test test-nightly test-durability test-sim check demo-cluster
+.PHONY: lint type test test-nightly test-durability test-sim check demo-cluster observability observability-down
 
 lint:
 	uv run ruff check .
@@ -27,3 +27,13 @@ check: lint type test
 # The demo cluster: chronosd + plain-1, slot-a, slot-b (Ctrl-C to stop).
 demo-cluster:
 	scripts/demo-cluster.sh
+
+# Prometheus + Grafana (ADR-0024). Start the demo cluster too (it writes the targets),
+# then open http://localhost:3000.
+observability:
+	@command -v docker >/dev/null || { echo "make observability needs Docker; Chronos itself runs without it" >&2; exit 1; }
+	docker compose -f deploy/observability/docker-compose.yml up -d
+	@echo "Grafana: http://localhost:3000   Prometheus: http://localhost:9090"
+
+observability-down:
+	docker compose -f deploy/observability/docker-compose.yml down

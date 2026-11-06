@@ -1,11 +1,14 @@
-"""Plain-text tables for `chronosctl get` (pure: the caller passes the time)."""
+"""Output for `chronosctl`: tables, YAML/JSON, describe (pure: the caller passes the time)."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from datetime import datetime
 
-from chronos.api import Deployment, Node, Pod
+import yaml
+
+from chronos.api import ApiObject, Deployment, Event, Node, Pod
 from chronos.api.quantity import CPU, MEMORY, format_quantity, is_extended
 
 NONE = "—"
@@ -85,3 +88,47 @@ def deployments(items: Sequence[Deployment], now: datetime) -> str:
         for d in items
     ]
     return table(["NAME", "READY", "ACTIVE", "AGE"], rows)
+
+
+def events(items: Sequence[Event], now: datetime) -> str:
+    """Newest last, as they happened."""
+    ordered = sorted(items, key=lambda e: (e.status.last_seen or now, e.metadata.name))
+    rows = [
+        [
+            age(e.status.last_seen, now),
+            e.spec.type,
+            e.spec.reason,
+            f"{e.spec.involved_kind.lower()}/{e.spec.involved_name}",
+            f"x{e.status.count}" if e.status.count > 1 else "",
+            e.spec.source,
+            e.status.message,
+        ]
+        for e in ordered
+    ]
+    return table(["LAST SEEN", "TYPE", "REASON", "OBJECT", "COUNT", "FROM", "MESSAGE"], rows)
+
+
+def generic(items: Sequence[ApiObject], now: datetime) -> str:
+    """Any registered kind without its own table (X-6)."""
+    rows = [[o.metadata.name, age(o.metadata.created_at, now)] for o in items]
+    return table(["NAME", "AGE"], rows)
+
+
+def as_data(items: Sequence[ApiObject]) -> list[dict[str, object]]:
+    return [o.model_dump(mode="json", exclude_defaults=False) for o in items]
+
+
+def as_yaml(items: Sequence[ApiObject]) -> str:
+    docs = as_data(items)
+    return yaml.safe_dump_all(docs, sort_keys=False) if docs else ""
+
+
+def as_json(items: Sequence[ApiObject]) -> str:
+    data = as_data(items)
+    return json.dumps(data[0] if len(data) == 1 else data, indent=2)
+
+
+def describe(obj: ApiObject, related: Sequence[Event], now: datetime) -> str:
+    body = yaml.safe_dump(obj.model_dump(mode="json"), sort_keys=False).rstrip()
+    tail = events(related, now) if related else "<none>"
+    return f"{body}\n\nEvents:\n{tail}"

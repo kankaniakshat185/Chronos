@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from chronos.api import Deployment, Node, Pod
+from chronos.api import Deployment, Event, Node, Pod
 from chronos.api.meta import ApiObject
 from chronos.store import validation
 
@@ -94,3 +94,4 @@ register_kind(
     )
 )
 register_kind(KindInfo(Deployment, "deployments", ("deployment", "deploy")))
+register_kind(KindInfo(Event, "events", ("event", "ev")))

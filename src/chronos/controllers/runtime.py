@@ -33,7 +33,7 @@ import random
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Coroutine, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, cast
 
 from chronos.api.meta import ApiObject
@@ -42,6 +42,9 @@ from chronos.client.protocol import WATCH_TIMEOUT, StoreClient
 from chronos.common.backoff import exponential, full_jitter
 from chronos.common.clock import Clock
 from chronos.common.config import Timings
+from chronos.common.logs import log_context
+from chronos.common.metrics import RECONCILE_SECONDS
+from chronos.core.schedule import SchedulerConfig
 from chronos.store.errors import Compacted, StoreError
 from chronos.store.kinds import NODE_INDEX, info
 
@@ -430,6 +433,8 @@ class Controller(ABC):
         self.queue = WorkQueue(clock)
         self.resync_period = resync_period
         self._informers = list(informers)
+        self._reconcile_seconds = RECONCILE_SECONDS.labels(self.name)  # exported from the start
+        self._traces = 0  # numbers each reconcile, for the logs' trace_id
 
     @abstractmethod
     async def reconcile(self, key: str) -> float | None:
@@ -448,8 +453,11 @@ class Controller(ABC):
 
     async def process_one(self) -> None:
         key = await self.queue.get()
+        started = self.clock.monotonic()
+        self._traces += 1
         try:
-            after = await self.reconcile(key)
+            with log_context(controller=self.name, key=key, trace_id=f"{self.name}-{self._traces}"):
+                after = await self.reconcile(key)
         except StoreError as exc:
             log.info("%s %s: requeued: %s", self.name, key, exc)
             self.queue.add_rate_limited(key)
@@ -461,6 +469,7 @@ class Controller(ABC):
             if after is not None:
                 self.queue.add_after(key, after)
         finally:
+            self._reconcile_seconds.observe(self.clock.monotonic() - started)
             self.queue.done(key)
 
     async def run(self) -> None:
@@ -501,6 +510,7 @@ class ControllerContext:
     informers: Informers
     clock: Clock
     timings: Timings
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
 
 
 type ControllerFactory = Callable[[ControllerContext], Controller]
@@ -514,7 +524,13 @@ def register_controller(name: str, factory: ControllerFactory) -> None:
     CONTROLLERS[name] = factory
 
 
-def start_all(ctx: ControllerContext) -> list[Callable[[], Coroutine[None, None, None]]]:
-    """Build every registered controller; return the loops to run (informers first)."""
-    controllers = [factory(ctx) for factory in CONTROLLERS.values()]
+def build_all(ctx: ControllerContext) -> list[Controller]:
+    """Every registered controller, on `ctx`'s shared informers."""
+    return [factory(ctx) for factory in CONTROLLERS.values()]
+
+
+def loops(
+    ctx: ControllerContext, controllers: list[Controller]
+) -> list[Callable[[], Coroutine[None, None, None]]]:
+    """What to run: the informers, then every controller."""
     return [ctx.informers.run, *(c.run for c in controllers)]

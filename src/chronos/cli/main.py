@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
 from chronos import __version__
-from chronos.api import ApiObject, Deployment, Node, Pod
+from chronos.api import ApiObject, Deployment, Event, Node, Pod
 from chronos.cli import render
 from chronos.cli.manifest import ManifestError, load
 from chronos.client.http import HttpStoreClient
 from chronos.common.clock import Clock, RealClock
-from chronos.store import AlreadyExists, Conflict, StoreError
+from chronos.store import AlreadyExists, Compacted, Conflict, StoreError
 from chronos.store.errors import Unavailable
 from chronos.store.kinds import lookup
 
@@ -31,15 +32,11 @@ clock: Clock = RealClock()
 CONFLICT_RETRIES = 10
 
 
-class Kind(StrEnum):
-    NODES = "nodes"
-    PODS = "pods"
-    DEPLOYMENTS = "deployments"
-
-
 class Output(StrEnum):
     TABLE = "table"
     WIDE = "wide"
+    YAML = "yaml"
+    JSON = "json"
 
 
 @app.callback()
@@ -71,7 +68,7 @@ def _run[T](ctx: typer.Context, work: Callable[[HttpStoreClient], Awaitable[T]])
 
 def _kind(name: str) -> type[ApiObject]:
     if (found := lookup(name)) is None:
-        typer.echo(f"error: unknown kind {name!r} (nodes, pods, deployments)", err=True)
+        typer.echo(f"error: unknown kind {name!r} (nodes, pods, deployments, events)", err=True)
         raise typer.Exit(code=2)
     return found.model
 
@@ -110,25 +107,143 @@ def apply(
     _run(ctx, work)
 
 
+def _table(model: type[ApiObject], items: list[Any], now: datetime, wide: bool) -> str:
+    if model is Node:
+        return render.nodes(items, now)
+    if model is Pod:
+        return render.pods(items, now, wide=wide)
+    if model is Deployment:
+        return render.deployments(items, now)
+    if model is Event:
+        return render.events(items, now)
+    return render.generic(items, now)
+
+
+def _format(model: type[ApiObject], items: list[Any], output: Output) -> str:
+    match output:
+        case Output.YAML:
+            return render.as_yaml(items).rstrip("\n")
+        case Output.JSON:
+            return render.as_json(items)
+        case _:
+            return _table(model, items, clock.wall(), output == Output.WIDE)
+
+
 @app.command()
 def get(
     ctx: typer.Context,
-    kind: Kind,
+    kind: Annotated[str, typer.Argument(help="nodes, pods, deployments, events, ...")],
+    name: Annotated[str | None, typer.Argument(help="Only this object.")] = None,
+    *,
     output: Annotated[Output, typer.Option("--output", "-o")] = Output.TABLE,
+    watch: Annotated[
+        bool, typer.Option("--watch", "-w", help="Print again after every change (Ctrl-C).")
+    ] = False,
+    max_updates: Annotated[int, typer.Option(hidden=True)] = 0,  # tests: stop after N
 ) -> None:
-    """List nodes, pods or deployments."""
+    """List objects of a kind (or one of them), once or as they change."""
+    model = _kind(kind)
+
+    async def listing(client: HttpStoreClient) -> tuple[str, int]:
+        if name is not None:
+            obj = await client.get(model, name)
+            return _format(model, [obj], output), obj.metadata.resource_version
+        items, revision = await client.list(model)
+        return _format(model, items, output), revision
+
+    async def work(client: HttpStoreClient) -> None:
+        text, revision = await listing(client)
+        typer.echo(text)
+        updates = 0
+        while watch and (not max_updates or updates < max_updates):
+            try:
+                batch = await client.watch(model, revision)
+            except Compacted:
+                batch = None  # fell behind the history: just list again
+            if batch is not None and not batch.events:
+                revision = batch.revision
+                continue
+            text, revision = await listing(client)
+            typer.echo(f"\n{text}")
+            updates += 1
+
+    _run(ctx, work)
+
+
+@app.command()
+def describe(ctx: typer.Context, kind: str, name: str) -> None:
+    """Show one object in full, with its recent events."""
+    model = _kind(kind)
 
     async def work(client: HttpStoreClient) -> str:
-        now = clock.wall()
-        match kind:
-            case Kind.NODES:
-                return render.nodes((await client.list(Node))[0], now)
-            case Kind.PODS:
-                return render.pods((await client.list(Pod))[0], now, wide=output == Output.WIDE)
-            case Kind.DEPLOYMENTS:
-                return render.deployments((await client.list(Deployment))[0], now)
+        obj = await client.get(model, name)
+        events, _ = await client.list(Event)
+        mine = [
+            e for e in events
+            if (e.spec.involved_kind, e.spec.involved_name) == (model.__name__, name)
+        ]  # fmt: skip
+        return render.describe(obj, mine, clock.wall())
 
     typer.echo(_run(ctx, work))
+
+
+@app.command()
+def logs(
+    ctx: typer.Context,
+    pod: str,
+    stderr: Annotated[bool, typer.Option("--stderr", help="stderr instead of stdout.")] = False,
+    agents_dir: Annotated[
+        Path | None,
+        typer.Option(
+            envvar="CHRONOS_AGENTS_DIR",
+            help="Where the agents keep their data. Default: ~/.chronos/agents",
+        ),
+    ] = None,
+) -> None:
+    """Print a pod's output (local mode: the agents run on this machine)."""
+
+    async def work(client: HttpStoreClient) -> Pod:
+        return await client.get(Pod, pod)
+
+    found = _run(ctx, work)
+    if not found.spec.node_name:
+        typer.echo(f"error: pod {pod} isn't on a node yet", err=True)
+        raise typer.Exit(code=1)
+    root = agents_dir or Path.home() / ".chronos" / "agents"
+    path = root / found.spec.node_name / "pods" / found.metadata.uid
+    path /= "stderr.log" if stderr else "stdout.log"
+    if not path.exists():
+        typer.echo(f"error: no log at {path} (is --agents-dir right?)", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(path.read_text(), nl=False)
+
+
+def _set_unschedulable(ctx: typer.Context, name: str, value: bool) -> None:
+    async def work(client: HttpStoreClient) -> None:
+        for _ in range(CONFLICT_RETRIES):
+            node = await client.get(Node, name)
+            node.spec.unschedulable = value
+            try:
+                await client.update(node)
+            except Conflict:
+                continue  # a heartbeat-driven status write in between: re-read
+            typer.echo(f"node/{name} {'cordoned' if value else 'uncordoned'}")
+            return
+        raise StoreError(f"node/{name}: still conflicting after {CONFLICT_RETRIES} attempts")
+
+    _run(ctx, work)
+
+
+@app.command()
+def cordon(ctx: typer.Context, node: str) -> None:
+    """Mark a node unschedulable: running pods stay, no new ones land there."""
+    _set_unschedulable(ctx, node, value=True)
+
+
+@app.command()
+def uncordon(ctx: typer.Context, node: str) -> None:
+    """Let new pods land on a node again."""
+    _set_unschedulable(ctx, node, value=False)
 
 
 @app.command()

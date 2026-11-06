@@ -25,10 +25,13 @@ from datetime import UTC, datetime
 from chronos.api import Node, Pod, PodPhase
 from chronos.api.pod import TERMINAL_PHASES
 from chronos.api.resources import add, sub
+from chronos.client.events import EventRecorder
 from chronos.client.local import LocalStoreClient
 from chronos.common.clock import Clock
+from chronos.common.metrics import BIND_CONFLICTS, SCHEDULING_SECONDS
 from chronos.controllers.runtime import Controller, Informers, register_controller
-from chronos.core.schedule import Bind, NodeInfo, Profile, SchedulerConfig, pick_node, resolve
+from chronos.core.schedule import Bind, NodeInfo, Profile, pick_node, resolve
+from chronos.store import StoreError
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +77,7 @@ class SchedulerController(Controller):
     ) -> None:
         informers = informers or Informers(client, clock)
         self._client = client
+        self.events = EventRecorder(client, clock, "scheduler")
         self._profile = profile
         self._assume_ttl = assume_ttl
         self._nodes = informers.get(Node)
@@ -131,6 +135,7 @@ class SchedulerController(Controller):
         pod = self._pods.get(key)
         if pod is None or not is_pending(pod) or key in self.assumed:
             return
+        started = self.clock.monotonic()
         decision = pick_node(pod, self.node_infos(), self._profile)
         if not isinstance(decision, Bind):
             await self._mark_unschedulable(pod, decision.message)
@@ -140,10 +145,16 @@ class SchedulerController(Controller):
         )
         try:
             await self._client.bind(key, decision.node, pod.metadata.resource_version)
-        except Exception:
+        except StoreError:
             self.assumed.pop(key, None)  # e.g. Conflict on a stale pod: requeued
+            BIND_CONFLICTS.inc()
             raise
+        except Exception:
+            self.assumed.pop(key, None)
+            raise
+        SCHEDULING_SECONDS.observe(self.clock.monotonic() - started)
         log.info("pod %s: bound to %s", key, decision.node)
+        await self.events.record(pod, "Scheduled", f"bound to {decision.node}")
 
     async def _mark_unschedulable(self, pod: Pod, message: str) -> None:
         if (pod.status.reason, pod.status.message) == (UNSCHEDULABLE, message):
@@ -151,6 +162,7 @@ class SchedulerController(Controller):
         pod.status.reason, pod.status.message = UNSCHEDULABLE, message
         await self._client.update_status(pod)
         log.info("pod %s: %s", pod.metadata.name, message)
+        await self.events.record(pod, "FailedScheduling", message, "Warning")
 
 
 register_controller(
@@ -158,7 +170,7 @@ register_controller(
     lambda ctx: SchedulerController(
         ctx.client,
         ctx.clock,
-        resolve(SchedulerConfig()),
+        resolve(ctx.scheduler),
         ctx.informers,
         resync_period=ctx.timings.resync_period,
     ),

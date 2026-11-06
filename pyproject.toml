@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.162.0",
     "httpx>=0.28.1",
+    "prometheus-client>=0.21",
     "psutil>=7.2.2",
     "pydantic>=2.14.2",
     "pyyaml>=6.0.3",
@@ -67,13 +68,14 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 timeout = 60
-addopts = "--strict-markers -m 'not chaos and not quarantine'"
+addopts = "--strict-markers -m 'not chaos and not quarantine and not observability'"
 xfail_strict = true
 filterwarnings = ["error"]
 markers = [
     "invariant(id): test checks the named invariant from docs/TESTING.md section 2",
     "integration: real chronosd + agents + workload processes",
     "chaos: long-running randomized fault injection",
+    "observability: needs the Prometheus + Grafana stack (make observability)",
     "sim: deterministic simulation runs (SIM_SEEDS seeds; canaries in tests/sim/test_canaries.py)",
     "quarantine: known-flaky test, excluded from PR runs (max 7 days)",
 ]

@@ -2,7 +2,7 @@
 
 Chronos makes strong claims: "never more than R replicas", "an acknowledged write survives a crash", "a pod never lands on a node without enough slots". Each claim is backed by tests. But a passing test only proves something if it *would fail* when the claim breaks. This log records how that was checked: by deliberately breaking the code that upholds each claim and confirming that a test notices.
 
-It covers the MVP through PM-4 (44 hand-made mutations plus the simulator's 10 canaries so far), and gets a new entry every time a guarantee is added.
+It covers the MVP through PM-5 (50 hand-made mutations plus the simulator's 10 canaries so far), and gets a new entry every time a guarantee is added.
 
 ---
 
@@ -120,6 +120,17 @@ For this block the mutations were run by a small script (kept outside the repo) 
 | 43 | A watch batch never applies to a cache that was relisted under it | the informer's generation check removed | informer race test | ❌ **survived** (see 3.9); caught after the test was made damaging |
 | 44 | A list older than the cache never replaces it | the informer's "older list" check removed | informer race test | ✅ caught |
 
+### PM-5: observability and the CLI
+
+| # | Guarantee | Injected bug | Expected to catch | Result |
+|---|---|---|---|---|
+| 45 | Metric names are an API | `chronos_nodes` renamed `chronos_node` | catalog golden test | ✅ caught |
+| 46 | The dashboard uses only real metrics | a panel queries `chronos_pod` | dashboard lint | ✅ caught |
+| 47 | Repeated events are one counted line | the recorder never increments `count` | event tests | ✅ caught |
+| 48 | `pack` packs | `MostAllocated` scores free space (spreads) | scheduler unit tests | ✅ caught (the first attempt was a `sed` that broke the syntax: an "error" is not a catch, so it was redone) |
+| 49 | Exported in base units | CPU in millicores | metrics test (`... cpu"} 2.0`) | ✅ caught |
+| 50 | Recurring events survive GC | GC by `first_seen` instead of `last_seen` | event GC test | ❌ **survived**: every test event was recorded once, so first and last seen were equal; caught after an "old but still recurring" event was added |
+
 ### PM-4: canaries (the simulator's own "test the tests", TESTING.md 6.5)
 
 Each canary switches off one protection inside the simulator, and the simulator must report a violation of the expected invariant. Measured over the first 40 seeds:
@@ -139,7 +150,7 @@ Each canary switches off one protection inside the simulator, and the simulator 
 
 `tests/sim/test_canaries.py` scans seeds from 0 for each canary and fails if its whole budget (200-1 000 seeds) passes clean. Two canaries started at 0/40; neither could be fixed by changing the canary (see 4.10 and 4.11).
 
-**Score:** of 43 code mutations, 35 were caught on the first try and 8 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4). Every survivor led to a new or redesigned test, and all 43 are caught now. One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
+**Score:** of 49 code mutations, 40 were caught on the first try and 9 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4, 1 in PM-5). Every survivor led to a new or redesigned test, and all 49 are caught now. One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
 
 ---
 

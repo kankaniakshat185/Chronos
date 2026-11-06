@@ -20,6 +20,7 @@ import logging
 
 from chronos.api import Node, NodeCondition, Pod, PodPhase
 from chronos.api.pod import TERMINAL_PHASES
+from chronos.client.events import EventRecorder
 from chronos.client.local import LocalStoreClient
 from chronos.common.clock import Clock
 from chronos.common.config import Timings
@@ -48,6 +49,7 @@ class NodeLifecycleController(Controller):
     ) -> None:
         informers = informers or Informers(client, clock)
         self._client = client
+        self.events = EventRecorder(client, clock, "node-lifecycle")
         self._timings = timings
         self._nodes = informers.get(Node)
         self._pods = informers.get(Pod)
@@ -88,6 +90,7 @@ class NodeLifecycleController(Controller):
                 log.info("pod %s: eviction deferred: %s", pod.metadata.name, exc)
                 continue
             log.info("pod %s: evicted (node %s NotReady)", pod.metadata.name, node)
+            await self.events.record(pod, "Evicted", f"node {node} is NotReady", "Warning")
 
     async def _transition(self, node: Node) -> NodeCondition:
         """Write the node's new condition if it changed; return the condition now stored."""
@@ -108,6 +111,10 @@ class NodeLifecycleController(Controller):
             log.info("node %s: transition to %s deferred: %s", name, new, exc)
             return old
         log.info("node %s: %s (silent %.2fs)", name, new, silence)
+        if new == NodeCondition.NOT_READY:
+            await self.events.record(
+                node, "NodeNotReady", f"no heartbeat for {silence:.1f}s", "Warning"
+            )
         return new
 
 

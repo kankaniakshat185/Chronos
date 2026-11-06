@@ -33,4 +33,4 @@ All ADRs start as **Proposed** (drafted during planning, 2026-10-21). They becom
 | [0021](0021-cuda-workload-toolchain.md) | CUDA workloads via numba-cuda, with a simulate mode | Deferred – Stage 2 | Stage 2 (P9) |
 | [0022](0022-week-1-mvp-scope.md) | MVP scope (formerly "Week-1 MVP"): temporary shortcuts and their pay-down plan | Deprecated (end of PM-3) | Stage 1, Part A |
 | [0023](0023-extension-seams.md) | Extension seams: resource map, extended resources and small registries | Proposed | Stage 1 |
-| [0024](0024-prometheus-grafana-observability.md) | Prometheus + Grafana for metrics and dashboards (required) | Proposed | Stage 1, PM-5 |
+| [0024](0024-prometheus-grafana-observability.md) | Prometheus + Grafana for metrics and dashboards (required) | Accepted | Stage 1, PM-5 |

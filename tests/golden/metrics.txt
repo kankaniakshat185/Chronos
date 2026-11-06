@@ -1,0 +1,16 @@
+# chronosd
+chronos_bind_conflicts_total{}
+chronos_node_heartbeat_age_seconds{node}
+chronos_nodes{condition}
+chronos_pods{phase}
+chronos_reconcile_duration_seconds{controller}
+chronos_resource_allocated{node,resource}
+chronos_resource_capacity{node,resource}
+chronos_scheduling_duration_seconds{}
+chronos_unschedulable_pods{reason}
+chronos_wal_fsync_duration_seconds{}
+chronos_workqueue_depth{controller}
+# agent
+chronos_agent_fence_events_total{}
+chronos_agent_heartbeat_failures_total{}
+chronos_agent_processes{state}

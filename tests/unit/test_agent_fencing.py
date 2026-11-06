@@ -11,7 +11,7 @@ from chronos.api.wire import HeartbeatReply, RegisterReply
 from chronos.common.clock import FakeClock
 from chronos.common.config import FencingConfig
 from chronos.core.agent_sync import LocalProc
-from chronos.store.errors import Unavailable
+from chronos.store.errors import NotFound, Unavailable
 
 FENCING = FencingConfig(heartbeat_interval=1.0, fence_timeout=6.0, termination_grace=2.0)
 
@@ -23,6 +23,7 @@ class FakeClient:
         self.down = False
         self.pods: list[Pod] = []
         self.revision = 1
+        self.created: list[object] = []
 
     async def register(
         self, node: str, epoch: str, capacity: Mapping[str, int], fencing: FencingConfig
@@ -35,6 +36,13 @@ class FakeClient:
         if self.down:
             raise Unavailable("down")
         return HeartbeatReply(condition="Ready")
+
+    async def get(self, kind: type, name: str) -> object:
+        raise NotFound(kind.__name__, name)
+
+    async def create(self, obj: object) -> object:
+        self.created.append(obj)
+        return obj
 
     async def list(self, kind: type, **_: object) -> tuple[list[Pod], int]:
         return self.pods, self.revision
@@ -147,6 +155,8 @@ async def test_failed_heartbeats_dont_renew_and_a_success_unfences(
     await agent.heartbeat_once()
     await agent.fence_check()
     assert not agent.fenced
+    [event] = client.created  # recorded once it can reach the control plane again
+    assert event.spec.reason == "Fenced" and event.spec.involved_name == "n1"  # type: ignore[attr-defined]
 
 
 async def test_coming_back_past_eviction_kills_before_the_lease_looks_fresh(

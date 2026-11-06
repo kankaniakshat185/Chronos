@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from prometheus_client import CollectorRegistry, start_http_server
 from pydantic import ValidationError
 
 from chronos import __version__
@@ -16,8 +17,10 @@ from chronos.agent.runtime import ProcessRuntime
 from chronos.api.quantity import CPU, MEMORY, QuantityError
 from chronos.api.resources import parse_resources
 from chronos.client.http import HttpStoreClient
+from chronos.common import logs
 from chronos.common.clock import RealClock
 from chronos.common.config import FencingConfig
+from chronos.common.metrics import AGENT_REGISTRY, AgentCollector, ProcessMetrics
 from chronos.core.agent_sync import Backoff
 
 app = typer.Typer(help="chronos-agent: the node agent.", no_args_is_help=True, add_completion=False)
@@ -66,6 +69,11 @@ def run(
     crash_backoff_reset: Annotated[
         float, typer.Option(help="A run this long resets the crash count.")
     ] = 60.0,
+    metrics_port: Annotated[
+        int, typer.Option(help="Serve Prometheus /metrics on this port (0: off).")
+    ] = 0,
+    metrics_host: str = "127.0.0.1",
+    log_format: Annotated[str, typer.Option(help="text, or json (one object per line).")] = "text",
 ) -> None:
     """Register NAME with the control plane and run the pods bound to it."""
     try:
@@ -84,8 +92,13 @@ def run(
     except (QuantityError, ValueError) as exc:
         typer.echo(f"chronos-agent: {exc}", err=True)
         raise typer.Exit(code=2) from None
-    logging.basicConfig(level=logging.INFO, format=f"%(asctime)s {name} %(name)s %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)  # not one line per request
+    if log_format not in ("text", "json"):
+        typer.echo(
+            f"chronos-agent: --log-format must be text or json (got {log_format!r})", err=True
+        )
+        raise typer.Exit(code=2)
+    logs.setup(log_format, text_prefix=f"{name} ")
+    logs.bind(node=name)
     client = HttpStoreClient(server, heartbeat_timeout=heartbeat_interval * 0.8)
     agent = Agent(
         name=name,
@@ -103,10 +116,21 @@ def run(
         backoff=Backoff(crash_backoff_base, crash_backoff_cap, crash_backoff_reset),
     )
     try:
+        if metrics_port:
+            serve_metrics(agent, metrics_host, metrics_port)
         asyncio.run(_main(agent, client))
     except AgentRejected as exc:
         typer.echo(f"chronos-agent: refused by the server: {exc}", err=True)
         raise typer.Exit(code=2) from None
+
+
+def serve_metrics(agent: Agent, host: str, port: int) -> None:
+    """A separate listener that Prometheus scrapes; the control plane never connects to
+    agents (ADR-0010). Runs on its own thread."""
+    registry = CollectorRegistry(auto_describe=False)
+    registry.register(ProcessMetrics(AGENT_REGISTRY))
+    registry.register(AgentCollector(lambda: agent.stats))
+    start_http_server(port, addr=host, registry=registry)
 
 
 async def _main(agent: Agent, client: HttpStoreClient) -> None:

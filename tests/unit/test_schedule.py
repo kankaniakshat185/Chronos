@@ -11,6 +11,7 @@ from chronos.core.schedule import (
     Unschedulable,
     fits_resources,
     least_allocated,
+    most_allocated,
     node_ready,
     node_schedulable,
     pick_node,
@@ -149,3 +150,20 @@ def test_zero_weight_turns_a_score_off() -> None:
     assert pick_node(pod(), nodes, PROFILE) == Bind("b")
     unweighted = resolve(SchedulerConfig(scores={"LeastAllocated": 0}))
     assert pick_node(pod(), nodes, unweighted) == Bind("a")  # name tie-break only
+
+
+def test_most_allocated_prefers_fuller_nodes() -> None:
+    p = pod(cpu=1000, memory=1024)
+    empty = node(cpu=4000, memory=4096)
+    busy = node(cpu=4000, memory=4096, allocated={"cpu": 2000, "memory": 2048})
+    assert most_allocated(p, empty) == 25
+    assert most_allocated(p, busy) == 75
+
+
+def test_pick_node_packs_with_most_allocated() -> None:
+    packing = resolve(SchedulerConfig(scores={"MostAllocated": 1}))
+    nodes = [
+        node("a", cpu=4000, memory=4096, allocated={"cpu": 3000}),
+        node("b", cpu=4000, memory=4096),
+    ]
+    assert pick_node(pod(cpu=500), nodes, packing) == Bind("a")

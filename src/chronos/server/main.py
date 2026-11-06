@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-import logging
 from pathlib import Path
 from types import FrameType
 from typing import Annotated
@@ -15,9 +14,12 @@ from pydantic import ValidationError
 import chronos.controllers  # noqa: F401 (registers the built-in controllers)
 from chronos import __version__
 from chronos.client.local import LocalStoreClient
+from chronos.common import logs
 from chronos.common.clock import RealClock
 from chronos.common.config import Timings
-from chronos.controllers.runtime import ControllerContext, Informers, start_all
+from chronos.common.metrics import ControlPlaneCollector
+from chronos.controllers.runtime import ControllerContext, Informers, build_all, loops
+from chronos.core.schedule import SchedulerConfig
 from chronos.server.app import create_app
 from chronos.store import Store
 from chronos.store.leases import Leases
@@ -48,7 +50,18 @@ class _Server(uvicorn.Server):
                 asyncio.get_running_loop().call_soon_threadsafe(closing.set)
 
 
-def build(timings: Timings, store: Store, group_window: float = 0.002) -> FastAPI:
+POLICIES = {
+    "spread": SchedulerConfig(scores={"LeastAllocated": 1}),
+    "pack": SchedulerConfig(scores={"MostAllocated": 1}),
+}
+
+
+def build(
+    timings: Timings,
+    store: Store,
+    group_window: float = 0.002,
+    scheduler: SchedulerConfig | None = None,
+) -> FastAPI:
     clock = RealClock()
     # Leases start empty at boot, so every node gets a full grace period after a restart
     # (U2.1): none is NotReady earlier than eviction_timeout after the server starts.
@@ -56,8 +69,12 @@ def build(timings: Timings, store: Store, group_window: float = 0.002) -> FastAP
         store, Leases(clock), timings.eviction_timeout, clock=clock, group_window=group_window
     )
     # Every registered controller (X-6), on one shared set of informers.
-    ctx = ControllerContext(client, Informers(client, clock), clock, timings)
-    return create_app(client, loops=start_all(ctx))
+    ctx = ControllerContext(
+        client, Informers(client, clock), clock, timings, scheduler or SchedulerConfig()
+    )
+    controllers = build_all(ctx)
+    metrics = ControlPlaneCollector(client, lambda: controllers)
+    return create_app(client, loops=loops(ctx, controllers), metrics=metrics)
 
 
 def _open_store(data_dir: Path, sync: SyncMode, snapshot_every: int) -> Store:
@@ -85,6 +102,10 @@ def run(
     ] = "full",
     group_window: Annotated[float, typer.Option(help="Group-commit window, ms.")] = 2.0,
     snapshot_every: int = 5_000,
+    log_format: Annotated[str, typer.Option(help="text, or json (one object per line).")] = "text",
+    scheduler_policy: Annotated[
+        str, typer.Option(help="spread (LeastAllocated) or pack (MostAllocated).")
+    ] = "spread",
     heartbeat_interval: float = 1.0,
     node_grace: float = 4.0,
     eviction_timeout: float = 10.0,
@@ -100,15 +121,23 @@ def run(
     except ValidationError as exc:
         typer.echo(f"chronosd: invalid timings: {exc}", err=True)
         raise typer.Exit(code=2) from None
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)  # not one line per request
+    if log_format not in ("text", "json"):
+        typer.echo(f"chronosd: --log-format must be text or json (got {log_format!r})", err=True)
+        raise typer.Exit(code=2)
+    logs.setup(log_format)
     if wal_sync not in ("full", "group", "none"):
         typer.echo(f"chronosd: --wal-sync must be full, group or none (got {wal_sync!r})", err=True)
+        raise typer.Exit(code=2)
+    if scheduler_policy not in POLICIES:
+        typer.echo(
+            f"chronosd: --scheduler-policy must be spread or pack (got {scheduler_policy!r})",
+            err=True,
+        )
         raise typer.Exit(code=2)
     mode: SyncMode = "group" if wal_sync == "group" else "none" if wal_sync == "none" else "full"
     store = _open_store(data_dir or Path.home() / ".chronos" / "server", mode, snapshot_every)
     try:
-        app_ = build(timings, store, group_window / 1000)
+        app_ = build(timings, store, group_window / 1000, POLICIES[scheduler_policy])
         # Open watches are answered at once on shutdown (_Server); anything else
         # still running after 1 s is cut: clients retry.
         config = uvicorn.Config(

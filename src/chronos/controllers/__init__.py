@@ -4,6 +4,6 @@ Importing this package registers the built-in controllers (X-6); `chronosd` star
 whatever is registered.
 """
 
-from chronos.controllers import deployment, node_lifecycle, scheduler
+from chronos.controllers import deployment, event_gc, node_lifecycle, scheduler
 
-__all__ = ["deployment", "node_lifecycle", "scheduler"]
+__all__ = ["deployment", "event_gc", "node_lifecycle", "scheduler"]

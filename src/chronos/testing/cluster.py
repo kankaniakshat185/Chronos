@@ -9,6 +9,7 @@ demo's `scripts/kill-node.sh` calls the same function.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import socket
@@ -103,6 +104,8 @@ class Cluster:
         self.url = f"http://127.0.0.1:{self.port}"
         self._server: subprocess.Popen[bytes] | None = None
         self.agents: dict[str, subprocess.Popen[bytes]] = {}
+        self.bind = os.environ.get("CHRONOS_BIND", "127.0.0.1")  # 0.0.0.0: scrape from Docker
+        self.metrics_ports: dict[str, int] = {}
 
     def _spawn(self, log_name: str, args: list[str]) -> subprocess.Popen[bytes]:
         with (self.root / f"{log_name}.log").open("ab") as log:  # the child keeps its own fd
@@ -118,7 +121,7 @@ class Cluster:
         self._server = self._spawn(
             "chronosd",
             [
-                "chronos.server.main", "run", "--port", str(self.port),
+                "chronos.server.main", "run", "--host", self.bind, "--port", str(self.port),
                 "--data-dir", str(self.root / "server"),
                 "--heartbeat-interval", str(t.heartbeat_interval),
                 "--node-grace", str(t.node_grace),
@@ -147,6 +150,18 @@ class Cluster:
         self.kill_server()
         await self.start()
 
+    def write_targets(self, path: Path, host: str = "host.docker.internal") -> None:
+        """Prometheus file service discovery for this cluster (ADR-0024)."""
+        agents = [f"{host}:{p}" for _, p in sorted(self.metrics_ports.items())]
+        path.write_text(
+            json.dumps(
+                [
+                    {"targets": [f"{host}:{self.port}"], "labels": {"component": "chronosd"}},
+                    {"targets": agents, "labels": {"component": "agent"}},
+                ]
+            )
+        )
+
     def agent_dir(self, name: str) -> Path:
         return self.root / "agents" / name
 
@@ -172,6 +187,8 @@ class Cluster:
         ]  # fmt: skip
         for res, units in (resources or {}).items():
             args += ["--resource", f"{res}={units}"]
+        port = self.metrics_ports.setdefault(name, free_port())
+        args += ["--metrics-port", str(port), "--metrics-host", self.bind]
         self.agents[name] = self._spawn(f"agent-{name}", args)
 
     def signal_agent(self, name: str, sig: signal.Signals) -> None:

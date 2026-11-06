@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import Literal
 
 from chronos.common import crashpoint
+from chronos.common.clock import stopwatch
+from chronos.common.metrics import WAL_FSYNC_SECONDS
 from chronos.store.codec import HEADER, InvalidFrame, Record, decode, encode
 
 log = logging.getLogger(__name__)
@@ -55,6 +57,12 @@ def durable_sync(fd: int) -> None:
         fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
     else:
         os.fsync(fd)
+
+
+def _timed_sync(fd: int) -> None:
+    elapsed = stopwatch()
+    durable_sync(fd)  # looked up at call time: the simulator replaces it
+    WAL_FSYNC_SECONDS.observe(elapsed())
 
 
 def sync_dir(path: Path) -> None:
@@ -246,7 +254,7 @@ class Wal:
         self._size += len(frame)
         if self.sync_mode == "full":
             crashpoint.hit("wal.before_fsync")
-            durable_sync(self._fd)
+            _timed_sync(self._fd)
             crashpoint.hit("wal.after_fsync_before_apply")
         else:
             self._dirty = True
@@ -256,7 +264,7 @@ class Wal:
         if self.sync_mode != "group" or not self._dirty:
             return
         crashpoint.hit("wal.before_fsync")
-        durable_sync(self._fd)
+        _timed_sync(self._fd)
         self._dirty = False
         crashpoint.hit("wal.after_fsync_before_apply")
 

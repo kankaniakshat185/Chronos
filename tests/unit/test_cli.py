@@ -7,6 +7,7 @@ intended output change, and review the diff.
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -227,3 +228,102 @@ def test_examples_are_valid_manifests(example: Path) -> None:
     from chronos.cli.manifest import load  # noqa: PLC0415
 
     assert load(example)
+
+
+# ---- PM-5 (P7.1): output formats, describe, events, cordon, logs, watch ----------------
+
+
+def test_yaml_and_json_round_trip(store: Store, clock: FakeClock) -> None:
+    import json  # noqa: PLC0415
+
+    import yaml  # noqa: PLC0415
+
+    demo_cluster(store, clock)
+    code, out = chronosctl("get", "pods", "web-k2x9p", "-o", "yaml")
+    assert code == 0
+    assert Pod.model_validate(yaml.safe_load(out)).spec.node_name == "plain-1"
+    code, out = chronosctl("get", "nodes", "-o", "json")
+    assert [n["metadata"]["name"] for n in json.loads(out)] == ["plain-1", "slot-a", "slot-b"]
+
+
+def test_describe_shows_the_object_and_its_events(store: Store, clock: FakeClock) -> None:
+    import asyncio  # noqa: PLC0415
+
+    from chronos.client.events import EventRecorder  # noqa: PLC0415
+
+    demo_cluster(store, clock)
+    rec = EventRecorder(LocalStoreClient(store, Leases(clock)), clock, "scheduler")
+    pending = store.get(Pod, "slot-demo-t5v3w")
+    for _ in range(3):
+        asyncio.run(rec.record(pending, "FailedScheduling", pending.status.message, "Warning"))
+    clock.advance(30)
+    code, out = chronosctl("describe", "pod", "slot-demo-t5v3w")
+    assert code == 0
+    assert "name: slot-demo-t5v3w" in out and "reason: Unschedulable" in out
+    events = out.split("Events:\n")[1]
+    [row] = events.splitlines()[1:]
+    assert row.split()[:6] == [
+        "30s",
+        "Warning",
+        "FailedScheduling",
+        "pod/slot-demo-t5v3w",
+        "x3",
+        "scheduler",
+    ]
+    assert "Insufficient chronos.dev/slot" in events
+    assert chronosctl("describe", "pod", "web-k2x9p")[1].endswith("Events:\n<none>\n")
+    code, out = chronosctl("get", "events")
+    assert code == 0 and "FailedScheduling" in out and out.startswith("LAST SEEN")
+
+
+def test_cordon_and_uncordon(store: Store, clock: FakeClock) -> None:
+    demo_cluster(store, clock)
+    assert chronosctl("cordon", "slot-a") == (0, "node/slot-a cordoned\n")
+    assert store.get(Node, "slot-a").spec.unschedulable
+    assert "Ready,Unschedulable" in chronosctl("get", "nodes")[1]
+    assert chronosctl("uncordon", "slot-a") == (0, "node/slot-a uncordoned\n")
+    assert not store.get(Node, "slot-a").spec.unschedulable
+
+
+def test_logs_reads_the_pods_output(store: Store, clock: FakeClock, tmp_path: Path) -> None:
+    demo_cluster(store, clock)
+    pod = store.get(Pod, "web-k2x9p")
+    logs = tmp_path / "plain-1" / "pods" / pod.metadata.uid
+    logs.mkdir(parents=True)
+    (logs / "stdout.log").write_text("hello\n")
+    (logs / "stderr.log").write_text("oops\n")
+    assert chronosctl("logs", "web-k2x9p", "--agents-dir", str(tmp_path)) == (0, "hello\n")
+    assert chronosctl("logs", "web-k2x9p", "--stderr", "--agents-dir", str(tmp_path)) == (
+        0,
+        "oops\n",
+    )
+    code, out = chronosctl("logs", "slot-demo-t5v3w", "--agents-dir", str(tmp_path))
+    assert code == 1 and "isn't on a node yet" in out
+
+
+def test_watch_prints_again_after_a_change(
+    store: Store, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo_cluster(store, clock)
+    connect = cli.connect
+
+    def changing(url: str) -> HttpStoreClient:
+        """Makes a change right before each watch, so the test needs no second writer."""
+        client = connect(url)
+        real_watch = client.watch
+
+        async def watch(*args: Any, **kwargs: Any) -> Any:
+            dep = store.get(Deployment, "web")
+            dep.spec.replicas += 1
+            store.update(dep)
+            return await real_watch(*args, **kwargs)
+
+        client.watch = watch  # type: ignore[method-assign]
+        return client
+
+    monkeypatch.setattr(cli, "connect", changing)
+    code, out = chronosctl("get", "deployments", "--watch", "--max-updates", "2")
+    assert code == 0, out
+    tables = out.split("\n\n")
+    assert len(tables) == 3
+    assert "2/3" in tables[0] and "2/4" in tables[1] and "2/5" in tables[2]

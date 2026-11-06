@@ -11,3 +11,11 @@ EVICTION=5
 FENCE=2
 GRACE=1
 DRIFT=1
+# chronosctl logs reads pod output from here (local mode).
+export CHRONOS_AGENTS_DIR="$CHRONOS_DEMO_DIR/agents"
+# Metrics (ADR-0024): each agent serves /metrics on its own port; Prometheus (in Docker)
+# reaches them through SCRAPE_HOST. On Linux, set CHRONOS_BIND=0.0.0.0 so it can.
+METRICS_PORT_BASE="${METRICS_PORT_BASE:-9101}"
+CHRONOS_BIND="${CHRONOS_BIND:-127.0.0.1}"
+SCRAPE_HOST="${SCRAPE_HOST:-host.docker.internal}"
+TARGETS_FILE="deploy/observability/targets/chronos.json"

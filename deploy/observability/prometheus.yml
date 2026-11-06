@@ -1,0 +1,11 @@
+# 1 s scrapes: a node goes NotReady 5 s after its last heartbeat in the demo, and
+# the dashboard should show it happen (ADR-0024).
+global:
+  scrape_interval: 1s
+  evaluation_interval: 1s
+
+scrape_configs:
+  - job_name: chronos
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/*.json]
+        refresh_interval: 2s  # bind mounts don't always pass file events through

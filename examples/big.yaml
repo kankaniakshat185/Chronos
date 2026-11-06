@@ -1,0 +1,12 @@
+# Asks for more CPU than any demo node has (each has 4 cores): it stays Pending, and
+# `chronosctl describe pod <name>` says why ("Insufficient cpu"). Scale it down or
+# delete it; nothing else is affected.
+kind: Deployment
+metadata:
+  name: big
+spec:
+  replicas: 1
+  template:
+    command: [python, -m, chronos.testing.workload, --label, big]
+    resources:
+      requests: {cpu: "16", memory: 64Mi}

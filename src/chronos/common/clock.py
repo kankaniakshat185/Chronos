@@ -12,6 +12,7 @@ import asyncio
 import heapq
 import itertools
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -75,3 +76,10 @@ class FakeClock:
     @property
     def pending_sleepers(self) -> int:
         return sum(1 for _, _, fut in self._sleepers if not fut.done())
+
+
+def stopwatch() -> Callable[[], float]:
+    """Start timing; the returned function gives the seconds elapsed (for metrics only:
+    real time, even in tests and the simulator)."""
+    start = time.perf_counter()
+    return lambda: time.perf_counter() - start

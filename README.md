@@ -14,7 +14,7 @@ level-triggered reconciliation. Workloads are real OS processes.
 > real-process test.
 
 **Status: `v0.1-mvp` + PM-1 (self-fencing) + PM-2 (durability) + PM-3 (watch and
-informers) + PM-4 (deterministic simulation).** The core loop works end to end; workloads are fenced when their node loses
+informers) + PM-4 (deterministic simulation) + PM-5 (CLI, events, metrics and dashboards).** The core loop works end to end; workloads are fenced when their node loses
 contact with the control plane, so a paused, crashed or partitioned node can't cause duplicate
 replicas; every acknowledged write is on disk before it's acknowledged, so a `chronosd` crash
 loses nothing; controllers and agents react to changes through watches instead of polling;
@@ -29,7 +29,7 @@ Needs [uv](https://docs.astral.sh/uv/) and macOS or Linux.
 
 ```bash
 uv sync                      # Python 3.12 + dependencies from uv.lock
-make check                   # ruff, mypy --strict, ~300 tests (unit, property, real-process)
+make check                   # ruff, mypy --strict, ~550 tests (unit, property, sim, real-process)
 make demo-cluster            # chronosd on :7070 + agents plain-1, slot-a, slot-b
 ```
 
@@ -40,6 +40,28 @@ uv run chronosctl get nodes
 uv run chronosctl apply -f examples/web.yaml
 uv run chronosctl get pods -o wide
 ```
+
+Dashboards (needs Docker): `make observability`, then open http://localhost:3000. Prometheus
+scrapes `chronosd` and every agent once a second, and the provisioned Chronos dashboard shows
+nodes by condition, pods by phase, reconcile and scheduling latency, queue depths, heartbeat
+age per node, fencing events, allocated vs capacity per resource, and WAL fsync latency
+([ADR-0024](docs/adr/0024-prometheus-grafana-observability.md)).
+
+**`chronosctl`:**
+
+| Command | What it does |
+|---------|--------------|
+| `apply -f FILE` | create or update (compare-and-swap, retried on conflict) |
+| `get KIND [NAME] [-o table\|wide\|yaml\|json] [--watch]` | nodes, pods, deployments, events, or any registered kind |
+| `describe KIND NAME` | the whole object, plus its events (e.g. why a pod is Pending) |
+| `logs POD [--stderr]` | the workload's output (local mode: agents on this machine) |
+| `scale deployment NAME --replicas N`, `delete KIND NAME` | |
+| `cordon NODE`, `uncordon NODE` | stop or resume new placements on a node |
+
+Examples in [`examples/`](examples/): `hello` (one pod), `web`, `slot-demo`, `crashy`
+(crash-loop back-off and its events), `big` (unschedulable, and `describe` says why).
+`chronosd` and the agent take `--log-format json` for one JSON object per line, carrying
+`component`, `node`, and each reconcile's `controller`, `key` and `trace_id`.
 
 ## Demo
 
@@ -56,6 +78,10 @@ timings: heartbeat 0.5 s, Unknown after 2 s of silence, NotReady (and eviction) 
 | 6 | `chronosctl scale deployment slot-demo --replicas 2` | the Pending pod is the one removed |
 | 7 | `scripts/kill-node.sh slot-a` | `slot-a` → Unknown → NotReady; its pods → `Failed/NodeLost`; `web` is replaced elsewhere; the slot pod's replacement **waits** instead of landing on `plain-1` |
 | 8 | `scripts/start-agent.sh slot-a --resource chronos.dev/slot=1` | `slot-a` is Ready again and the waiting pod takes its slot |
+| 9 | `chronosctl get events` | the story so far, one line per object and reason: Scheduled, Started, FailedScheduling, NodeNotReady, Evicted, ... |
+
+With `make observability` running, watch step 7 on the dashboard: `slot-a`'s heartbeat age
+climbs, it flips to NotReady 5 s later, `Failed` pods appear and then the replacements.
 
 The same scenario runs as an automated test,
 [`test_demo_scenario.py`](tests/integration/test_demo_scenario.py), and unattended against a
@@ -178,7 +204,7 @@ every PR ([`tests/sim/regressions.txt`](tests/sim/regressions.txt)). CI: 200 see
 
 > **What this does NOT do yet.** Each item names the planned fix. PM-1 closed the items
 > about fencing, crash backoff and one-phase deletion; PM-2 closed durability; PM-3 closed
-> polling.
+> polling; PM-5 closed metrics and dashboards.
 
 1. **No chaos testing on real processes.** Randomized faults (partitions, delays, loss, crashes, freezes) run in the deterministic simulator, but against real processes and sockets only scripted integration tests exist. → PM-6 (chaos harness).
 2. **No GPU/CUDA support: planned, Stage 2 (deferred).** Nothing detects or uses GPUs, and no CUDA runs. Stage 1 provides the seams GPU support plugs into: extended resources (X-1/X-2), workload types (X-4) and resource providers (X-5), proven in-process by PX.9 ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)).
@@ -186,10 +212,9 @@ every PR ([`tests/sim/regressions.txt`](tests/sim/regressions.txt)). CI: 200 see
 4. **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → Backlog (P11.x, ADR-0018); not scheduled.
 5. **No benchmarks.** Timings visible in the demo are a single run on a laptop, not measured distributions. → B1–B6, PM-6.
 6. **No jobs / run-to-completion workloads: planned, Stage 2 (deferred)** (ADR-0020). Only long-running Deployments. The kind and controller registries (X-6, built in PM-3) make Jobs purely additive.
-7. **Scheduling policy is basic.** `LeastAllocated` only. → `MostAllocated`, PM-5. Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
+7. **Scheduling policies are generic.** `LeastAllocated` (spread, default) or `MostAllocated` (pack), chosen with `chronosd --scheduler-policy`. Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
 8. **No auth, TLS or multi-tenancy.** It's built for a trusted localhost. (Non-goal.)
 9. **Extensions are in-process only.** There's no plugin loader; new kinds, controllers, resources, workload types and providers are registered by in-tree code. (Conscious limit, ADR-0023; a loader may be added at the start of Stage 2 if needed.)
-10. **No metrics or dashboards.** There's no `/metrics` endpoint, Prometheus or Grafana yet; observe the cluster with `chronosctl get`. → PM-5 (P7.4, P7.6, [ADR-0024](docs/adr/0024-prometheus-grafana-observability.md)).
 
 ## Design limitations (deliberate)
 
@@ -209,7 +234,7 @@ The block names used above, in build order:
 | **PM-2** ✅ | Durability: write-ahead log with CRC framing, snapshots, crash-point-tested recovery |
 | **PM-3** ✅ | Watch + informers + work queue + expectations + assume cache, replacing polling; kind and controller registries |
 | **PM-4** ✅ | Deterministic simulation with canary bugs |
-| **PM-5** | Full CLI, structured logs, events, `/metrics`, Prometheus + Grafana |
+| **PM-5** ✅ | Full CLI, structured logs, events, `/metrics`, Prometheus + Grafana |
 | **PM-6** | Chaos harness (partitions, pauses, delays) and benchmarks |
 | **PM-9** | Probes, rolling updates, memory limits, drain; final write-up |
 | Stage 2 | GPU-aware scheduling and CUDA workloads, on the seams above (deferred) |
@@ -231,6 +256,8 @@ src/chronos/
   sim/          deterministic simulator: engine, network, disk, faults, invariants, canaries
   cli/          chronosctl
   testing/      test workload, real-cluster fixture, kill_node()
+deploy/         Prometheus + Grafana (docker compose, provisioning, the dashboard)
+examples/       manifests for the demo
 docs/adr/       architecture decision records
 docs/devlog/    what was built each day, and what broke
 ```
