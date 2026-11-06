@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 
 from chronos.api import Deployment, DeploymentStatus, ObjectMeta, Pod, PodPhase, PodSpec
 from chronos.api.pod import TERMINAL_PHASES
+from chronos.core import rollout
 
 KEEP_FINISHED = 3
 DEPLOYMENT_LABEL = "chronos.dev/deployment"
@@ -61,7 +62,10 @@ def pick_victims(active: Iterable[Pod], n: int) -> list[Pod]:
 
 
 def template_hash(dep: Deployment) -> str:
-    return hashlib.sha256(dep.spec.template.model_dump_json().encode()).hexdigest()[:10]
+    # exclude_none: fields added later (probes) don't change the hash of templates that
+    # don't use them, so an upgrade doesn't roll out every deployment for nothing.
+    data = dep.spec.template.model_dump_json(exclude_none=True)
+    return hashlib.sha256(data.encode()).hexdigest()[:10]
 
 
 def pod_for(dep: Deployment, name: str) -> Pod:
@@ -81,14 +85,21 @@ def reconcile(dep: Deployment, pods: list[Pod]) -> list[Action]:
     """`pods` must be exactly the pods owned by `dep` (owner == its uid)."""
     active = [p for p in pods if is_active(p)]
     actions: list[Action] = []
-    diff = dep.spec.replicas - len(active)
-    if diff > 0:
-        actions.append(CreatePod(diff))
-    elif diff < 0:
-        actions += [
-            DeletePod(p.metadata.name, p.metadata.resource_version)
-            for p in pick_victims(active, -diff)
-        ]
+    current = template_hash(dep)
+    if any(rollout.is_outdated(p, current) for p in active):  # a rolling update (P10.2)
+        step = rollout.step(dep, active, current)
+        if step.create:
+            actions.append(CreatePod(step.create))
+        actions += [DeletePod(p.metadata.name, p.metadata.resource_version) for p in step.delete]
+    else:
+        diff = dep.spec.replicas - len(active)
+        if diff > 0:
+            actions.append(CreatePod(diff))
+        elif diff < 0:
+            actions += [
+                DeletePod(p.metadata.name, p.metadata.resource_version)
+                for p in pick_victims(active, -diff)
+            ]
 
     # Terminating pods are neither active nor finished: their agent is stopping them.
     finished = sorted(
@@ -102,6 +113,7 @@ def reconcile(dep: Deployment, pods: list[Pod]) -> list[Action]:
         observed_generation=dep.metadata.generation,
         replicas=len(active),
         ready_replicas=sum(p.status.ready for p in active),
+        updated_replicas=sum(not rollout.is_outdated(p, current) for p in active),
     )
     if status != dep.status:
         actions.append(UpdateStatus(status))

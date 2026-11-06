@@ -45,6 +45,8 @@ KINDS = (
     "node_crash", "agent_crash", "agent_pause", "node_freeze",  # node faults
     "partition", "delay", "drop", "degrade",  # network faults (per node link)
     "crash_storm",  # workloads crash
+    "update",  # a template change (rolling update)
+    "flap", "sick",  # a node's readiness / liveness probes fail for a while (P10.1)
     "cp_crash",  # the control plane crashes and restarts from its WAL
 )  # fmt: skip
 
@@ -68,6 +70,7 @@ class Scenario:
 
 def generate(seed: int) -> Scenario:  # noqa: PLR0912 (one branch per entry kind)
     rng = random.Random(f"scenario-{seed}")
+    tier2 = random.Random(f"scenario-{seed}-tier2")
     resources = [f"sim{seed % 97}.dev/r{i}" for i in range(rng.choice([0, 1, 1, 2]))]
     nodes = []
     for i in range(rng.randint(2, 6)):
@@ -82,7 +85,7 @@ def generate(seed: int) -> Scenario:  # noqa: PLR0912 (one branch per entry kind
     deployments = []
     for d in range(rng.randint(1, 3)):  # at the start
         deployments.append(f"d{d + 1}")
-        entries.append(_deploy(rng, f"d{d + 1}", rng.uniform(0.5, 2.0), resources))
+        entries.append(_deploy(rng, tier2, f"d{d + 1}", rng.uniform(0.5, 2.0), resources))
     lo, hi = FAULT_WINDOW
     for _ in range(rng.randint(2, 10)):
         at = round(rng.uniform(lo, hi), 3)
@@ -95,7 +98,7 @@ def generate(seed: int) -> Scenario:  # noqa: PLR0912 (one branch per entry kind
         if kind == "deploy":
             name = f"d{len(deployments) + 1}"
             deployments.append(name)
-            entries.append(_deploy(rng, name, at, resources))
+            entries.append(_deploy(rng, tier2, name, at, resources))
         elif kind in ("scale", "undeploy"):
             entries.append(
                 Entry(at, kind, rng.choice(deployments), 0.0, {"replicas": rng.randint(0, 6)})
@@ -119,17 +122,35 @@ def generate(seed: int) -> Scenario:  # noqa: PLR0912 (one branch per entry kind
             elif kind == "crash_storm":
                 arg = {"rate": round(rng.uniform(0.2, 2.0), 3)}
             entries.append(Entry(at, kind, rng.choice(names), duration, arg))
+    # Tier 2 (P10.5) from a stream of its own, so every seed keeps the schedule it had
+    # before: the seeds in tests/sim/regressions.txt still replay what found their bugs.
+    for _ in range(tier2.randint(1, 4)):
+        at = round(tier2.uniform(lo, hi), 3)
+        kind = tier2.choice(["update", "update", "flap", "sick"])
+        if kind == "update":  # a template change: a rolling update (P10.2)
+            version: dict[str, object] = {"version": tier2.randint(2, 99)}
+            entries.append(Entry(at, kind, tier2.choice(deployments), 0.0, version))
+        else:  # a node's readiness (flap) or liveness (sick) probes fail for a while
+            duration = round(tier2.choice([tier2.uniform(0.2, 3.0), tier2.uniform(3.0, 15.0)]), 3)
+            entries.append(Entry(at, kind, tier2.choice(names), duration))
     entries.sort(key=lambda e: (e.at, e.kind, e.target))
     return Scenario(seed, nodes, resources, entries)
 
 
-def _deploy(rng: random.Random, name: str, at: float, resources: list[str]) -> Entry:
+def _deploy(
+    rng: random.Random, tier2: random.Random, name: str, at: float, resources: list[str]
+) -> Entry:
     requests: dict[str, object] = {
         CPU: rng.choice([100, 250, 500, 1000]),
         MEMORY: rng.choice([64, 128, 256, 512]) * MIB,
     }
     if resources and rng.random() < 0.5:
         requests[rng.choice(resources)] = 1
+    replicas = rng.randint(1, 5)
+    surge, unavailable = tier2.choice([(1, 0), (0, 1), (1, 1), (2, 0), (2, 1)])
     return Entry(
-        round(at, 3), "deploy", name, 0.0, {"replicas": rng.randint(1, 5), "requests": requests}
-    )
+        round(at, 3), "deploy", name, 0.0,
+        {"replicas": replicas, "requests": requests, "surge": surge,
+         "unavailable": unavailable, "readiness": tier2.random() < 0.6,
+         "liveness": tier2.random() < 0.4},
+    )  # fmt: skip

@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from chronos.agent.agent import heartbeat_timeout
-from chronos.api import Deployment, DeploymentSpec, ObjectMeta, PodTemplate
+from chronos.api import Deployment, Pod
+from chronos.api.pod import Probe
 from chronos.api.resources import format_resources
 from chronos.common.config import FencingConfig, Timings
 from chronos.controllers.runtime import Informer
@@ -73,6 +74,41 @@ class Result:
         return "\n".join(lines)
 
 
+def _deployment(e: Entry) -> Deployment:
+    """A deploy entry as a Deployment: some with probes, each with its own strategy."""
+    template: dict[str, object] = {
+        "command": ["workload"],
+        "resources": {"requests": format_resources(e.arg["requests"])},  # type: ignore[arg-type]
+        "env": {"v": "1"},
+    }
+    if e.arg.get("readiness"):
+        template["readiness_probe"] = {"tcp_port": 1, "period_seconds": 0.5}
+    if e.arg.get("liveness"):
+        template["liveness_probe"] = {"tcp_port": 1, "period_seconds": 0.5, "failure_threshold": 2}
+    strategy = {"max_surge": e.arg.get("surge", 1), "max_unavailable": e.arg.get("unavailable", 0)}
+    return Deployment.model_validate({
+        "metadata": {"name": e.target},
+        "spec": {"replicas": int(str(e.arg["replicas"])), "template": template,
+                 "strategy": strategy},
+    })  # fmt: skip
+
+
+class SimProber:
+    """Probes in the simulator: they pass unless their node has a flap (readiness) or a
+    sick (liveness) fault active. The real agent code runs them and acts on the results."""
+
+    def __init__(self, world: World) -> None:
+        self._world = world
+
+    async def check(self, pod: Pod, probe: Probe) -> bool:
+        node = self._world.nodes.get(pod.spec.node_name or "")
+        if node is None:
+            return False
+        if probe is pod.spec.readiness_probe:
+            return not node.flapping
+        return not node.sick
+
+
 class World:
     def __init__(self, scenario: Scenario, hooks: canaries.Hooks, disk: SimDisk) -> None:
         self.scenario = scenario
@@ -101,6 +137,7 @@ class World:
             heartbeat_timeout=hooks.heartbeat_timeout
             or heartbeat_timeout(f.heartbeat_interval, f.fence_timeout),  # as the real agent
             patches=list(hooks.agent or []),
+            prober=SimProber(self),
         )  # fmt: skip
         self.nodes = {
             spec.name: SimNode(
@@ -175,7 +212,7 @@ class World:
     def _play(self, e: Entry) -> None:  # noqa: PLR0912, PLR0915 (one branch per kind)
         node = self.nodes.get(e.target)
         match e.kind:
-            case "deploy" | "scale" | "undeploy":
+            case "deploy" | "scale" | "undeploy" | "update":
                 self._user(e, attempts=20)
             case "cp_crash":
                 if self.cp is None or not self.cp.alive:
@@ -229,6 +266,9 @@ class World:
             case "drop" if node is not None:
                 links = [self.net.link(node.name, CP), self.net.link(CP, node.name)]
                 self._for(e, links, "drop", float(str(e.arg["p"])), 0.0)
+            case "flap" | "sick" if node is not None:
+                attr = "flapping" if e.kind == "flap" else "sick"
+                self._for(e, [node], attr, True, False)
             case "crash_storm" if node is not None:
                 self._storm(node, self.sim.now + e.duration, float(str(e.arg["rate"])))
             case _:
@@ -276,17 +316,16 @@ class World:
         client = cp.client
         try:
             if e.kind == "deploy":
-                requests = format_resources(e.arg["requests"])  # type: ignore[arg-type]
-                dep = Deployment(
-                    metadata=ObjectMeta(name=e.target),
-                    spec=DeploymentSpec(
-                        replicas=int(str(e.arg["replicas"])),
-                        template=PodTemplate.model_validate(
-                            {"command": ["workload"], "resources": {"requests": requests}}
-                        ),
-                    ),
-                )
-                run_sync(client.create(dep))
+                run_sync(client.create(_deployment(e)))
+            elif e.kind == "update":
+                for _ in range(5):
+                    dep = run_sync(client.get(Deployment, e.target))
+                    dep.spec.template.env = {"v": str(e.arg["version"])}
+                    try:
+                        run_sync(client.update(dep))
+                        break
+                    except Conflict:
+                        continue
             elif e.kind == "scale":
                 for _ in range(5):
                     dep = run_sync(client.get(Deployment, e.target))

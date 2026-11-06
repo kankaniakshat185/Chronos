@@ -149,3 +149,62 @@ def test_the_lease_bound_is_f_plus_k_plus_drift_poll_and_sampling(chaos: Chaos) 
     chaos._s4(procs, 1.4)
     chaos._s4(procs, 1.6)
     assert invariants(chaos) == ["S4"]
+
+
+# ---- S7: rolling updates ---------------------------------------------------------------
+
+
+def rollout(old: int, new: int, ready: int) -> tuple[list[Deployment], list[Pod]]:
+    """d1 (3 replicas, surge 1, unavailable 0) mid-rollout: `ready` of its pods ready."""
+    from chronos.core.reconcile import template_hash  # noqa: PLC0415
+
+    dep = deployment("d1", "D", 3)
+    pods = []
+    for i in range(old + new):
+        p = pod(f"d1-{i}", f"u{i}", "s3n1", owner="D")
+        p.spec.template_hash = "old" if i < old else template_hash(dep)
+        p.status.ready = i < ready
+        pods.append(p)
+    return [dep], pods
+
+
+def test_more_than_replicas_plus_surge_during_a_rollout(chaos: Chaos) -> None:
+    deps, pods = rollout(old=3, new=1, ready=3)  # 4 = 3 + 1: allowed
+    chaos._s7(pods, deps, 1.0)
+    chaos._s7(pods, deps, 1.2)
+    assert invariants(chaos) == []
+    deps, pods = rollout(old=3, new=2, ready=3)  # 5 > 3 + 1
+    chaos._s7(pods, deps, 1.4)
+    chaos._s7(pods, deps, 1.6)
+    assert invariants(chaos) == ["S7"]
+
+
+def test_ready_pods_taken_below_the_floor_in_a_calm_window(chaos: Chaos) -> None:
+    chaos.last_fault = 0.0
+    deps, pods = rollout(old=3, new=1, ready=4)
+    chaos._s7(pods, deps, 20.0)  # calm: the window starts with 4 ready (floor 3)
+    deps, pods = rollout(old=1, new=1, ready=2)  # two ready old pods gone at once
+    chaos._s7(pods, deps, 20.2)
+    chaos._s7(pods, deps, 20.4)
+    assert invariants(chaos) == ["S7"]
+
+
+def test_readiness_lost_under_a_fault_is_not_the_controllers(chaos: Chaos) -> None:
+    chaos.faults = 1  # e.g. a flap: probes fail on a node
+    deps, pods = rollout(old=3, new=1, ready=4)
+    chaos._s7(pods, deps, 20.0)
+    deps, pods = rollout(old=3, new=1, ready=1)
+    for t in (20.2, 20.4, 20.6):
+        chaos._s7(pods, deps, t)
+    chaos.faults, chaos.last_fault = 0, 20.6  # healed, but not settled yet
+    for t in (21.0, 21.2):
+        chaos._s7(pods, deps, t)
+    assert invariants(chaos) == []
+
+
+def test_s3_allows_the_surge_during_a_rollout(chaos: Chaos) -> None:
+    deps, pods = rollout(old=3, new=1, ready=3)
+    procs = [Workload(10 + i, p.metadata.uid, "s3n1", "chaos-d1") for i, p in enumerate(pods)]
+    for t in (10.0, 10.2):
+        chaos._s3(pods, deps, procs, t)
+    assert invariants(chaos) == []

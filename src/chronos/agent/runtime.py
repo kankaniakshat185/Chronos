@@ -28,6 +28,7 @@ import psutil
 
 from chronos.agent.providers import Providers
 from chronos.api import Pod
+from chronos.api.quantity import MEMORY
 from chronos.api.workload_types import workload_type
 from chronos.common.clock import Clock, RealClock
 from chronos.common.config import FencingConfig
@@ -65,6 +66,8 @@ class ProcessRuntime:
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping: set[str] = set()
         self._fenced: set[str] = set()
+        self._oom: set[str] = set()
+        self._limits: dict[str, int] = {}  # uid -> memory limit (bytes)
         (data_dir / "pids").mkdir(parents=True, exist_ok=True)
         (data_dir / "pods").mkdir(parents=True, exist_ok=True)
         (data_dir / "agent.pid").write_text(str(os.getpid()))
@@ -147,6 +150,8 @@ class ProcessRuntime:
             return
         self._pidfile(uid).write_text(str(proc.pid))
         self._handles[uid] = proc
+        if limit := pod.spec.resources.limits.get(MEMORY):
+            self._limits[uid] = limit
         self._procs[uid] = LocalProc(
             uid, name, proc.pid, started_at=self._clock.monotonic(), restarts=restarts,
             crashes=crashes, assigned=assigned,
@@ -166,6 +171,29 @@ class ProcessRuntime:
         if uid in self._handles and uid not in self._stopping:
             self._stopping.add(uid)
             self._spawn(self._stop(uid, self._handles[uid]))
+
+    def enforce_memory(self) -> list[str]:
+        """SIGKILL every pod whose processes use more resident memory than its memory
+        limit (P10.3); returns their names. The exit is recorded as OOMKilled."""
+        killed = []
+        for uid, handle in list(self._handles.items()):
+            limit = self._limits.get(uid)
+            if not limit or uid in self._oom:
+                continue
+            try:
+                shim = psutil.Process(handle.pid)
+                rss = sum(p.memory_info().rss for p in [shim, *shim.children(recursive=True)])
+            except psutil.Error:
+                continue
+            if rss > limit:
+                proc = self._procs.get(uid)
+                name = proc.pod_name if proc else uid
+                log.warning("pod %s: %d MiB resident > limit %d MiB: OOMKilled",
+                            name, rss // 2**20, limit // 2**20)  # fmt: skip
+                self._oom.add(uid)
+                _killpg(handle.pid, signal.SIGKILL)
+                killed.append(name)
+        return killed
 
     def kill_now(self, uid: str) -> None:
         """SIGKILL the group at once (fenced): replacements may already be running."""
@@ -196,14 +224,21 @@ class ProcessRuntime:
     async def _wait(self, uid: str, proc: asyncio.subprocess.Process) -> None:
         code = await proc.wait()
         self._providers.release(uid)  # S12: units are free once the process is gone
+        reason = ""
         if uid in self._fenced:
             self._fenced.discard(uid)
             code = FENCED_EXIT_CODE
+        elif uid in self._oom:
+            reason = "OOMKilled"
+        self._oom.discard(uid)
+        self._limits.pop(uid, None)
         self._pidfile(uid).unlink(missing_ok=True)
         self._handles.pop(uid, None)
         current = self._procs.get(uid)
         if current is not None and current.pid == proc.pid:  # not already restarted
-            self._procs[uid] = replace(current, exit_code=code, exited_at=self._clock.monotonic())
+            self._procs[uid] = replace(
+                current, exit_code=code, exited_at=self._clock.monotonic(), reason=reason
+            )
         log.info("pod %s: pid %d exited with %d", uid, proc.pid, code)
         self._changed()
 

@@ -10,14 +10,20 @@ table every 200 ms. At the end everything is healed and liveness is checked.
 Faults: kill -9 an agent (its workloads stay, under their shims), kill -9 a whole node,
 kill -9 chronosd (restart from the WAL), SIGSTOP an agent (a GC pause), SIGSTOP a whole
 node (agent + shims + workloads: a VM freeze), proxy delay / drop / blackhole / reset,
-and workload crash storms. Workloads request extended resources whose names are
-generated per run (X-7).
+workload crash storms, and probe faults: a node's readiness probes fail for a while
+(flap) or its liveness probes do (sick: the pods are restarted). Workloads request
+extended resources whose names are generated per run (X-7); some have exec probes, each
+deployment has its own rollout strategy, and template updates start rolling updates.
 
 What's checked, live: S1, S2 and S11 (per resource name), S12 from the store; S3 and S4
-against the process table. The store and the process table can't be read atomically,
-so S3 and S4 count only if they hold in two consecutive samples (>= 200 ms): the real-
-time view has that resolution, and the simulator checks the same invariants exactly.
-After the heal: L1, L2 and L5.
+against the process table; S7 (rolling updates): at most replicas + max_surge pods while
+one runs, and, in calm windows (no fault for SETTLE s), ready pods never pushed below
+replicas - max_unavailable (involuntary losses under faults aren't the controller's).
+The store and the process table can't be read atomically, so S3, S4 and S7 count only if
+they hold in two consecutive samples (>= 200 ms): the real-time view has that
+resolution, and the simulator checks the same invariants exactly.
+After the heal: L1, L2 (rollouts finished, unless stuck on pods that fit nowhere), L3
+and L5.
 
 Output: `<out>/<seed>/report.json` and `timeline.md`. Exit code 1 on any violation.
 """
@@ -49,6 +55,8 @@ from chronos.api.quantity import is_extended
 from chronos.api.resources import add
 from chronos.client import HttpStoreClient
 from chronos.common.clock import RealClock
+from chronos.core.reconcile import is_active, template_hash
+from chronos.core.rollout import is_outdated
 from chronos.store import Conflict, StoreError
 from chronos.testing.cluster import Cluster, Timings, free_port, kill_node
 from chronos.testing.faultproxy import PASS, FaultProxy, Mode
@@ -65,7 +73,8 @@ CHAOS_TIMINGS = Timings(
     crash_backoff_base=0.5, crash_backoff_cap=4.0,
 )  # fmt: skip
 QUIET = 30.0  # after the heal: > eviction (5 s) + crash back-off cap (4 s) + starts
-CONSECUTIVE = 2  # S3/S4: samples in a row before it's a violation
+CONSECUTIVE = 2  # S3/S4/S7: samples in a row before it's a violation
+SETTLE = 10.0  # S7 availability: a window is calm this long after the last fault healed
 clock = RealClock()
 
 
@@ -96,7 +105,9 @@ class Report:
         return not self.violations and self.converged_after is not None
 
 
-NODE_FAULTS = ["kill_agent", "kill_node", "pause_agent", "freeze_node", "crash_storm"]
+NODE_FAULTS = ["kill_agent", "kill_node", "pause_agent", "freeze_node", "crash_storm", "flap",
+               "sick"]  # fmt: skip
+ACTIONS = ("scale", "deploy", "update")
 LINK_FAULTS = ["delay", "drop", "blackhole", "reset"]
 
 
@@ -109,9 +120,12 @@ def plan(seed: int, names: list[str], duration: float) -> tuple[list[Step], list
     t = 3.0
     while t < duration - 3:
         t += rng.uniform(1.0, 4.0)
-        kind = rng.choice([*NODE_FAULTS, *LINK_FAULTS, "kill_cp", "scale", "scale", "deploy"])
-        if kind in ("scale", "deploy"):
-            steps.append(Step(round(t, 2), kind, arg={"replicas": rng.randint(0, 6)}))
+        kind = rng.choice(
+            [*NODE_FAULTS, *LINK_FAULTS, "kill_cp", "scale", "scale", "deploy", "update", "update"]
+        )
+        if kind in ACTIONS:
+            action = {"replicas": rng.randint(0, 6), "version": rng.randint(2, 99)}
+            steps.append(Step(round(t, 2), kind, arg=action))
             continue
         target = "cp" if kind == "kill_cp" else rng.choice(names)
         if busy.get(target, 0.0) > t:
@@ -148,6 +162,10 @@ class Chaos:
         self.replicas_seen: dict[str, list[tuple[float, int]]] = {}
         self.strikes: Counter[str] = Counter()
         self.conditions: dict[str, str] = {}
+        self.faults = 0  # active now
+        self.last_fault = 0.0  # when the last one healed
+        self.floor: dict[str, tuple[int, int]] = {}  # S7: uid -> (replicas, ready floor)
+        self.flags = root / "probe-faults"  # flap-<node> / sick-<node>: probes fail
 
     # ---- helpers
 
@@ -229,32 +247,71 @@ class Chaos:
         }
         if self.resources and self.rng.random() < 0.5:
             requests[self.rng.choice(self.resources)] = 1
+        template: dict[str, Any] = {
+            "command": [sys.executable, "-m", WORKLOAD, "--label", f"chaos-{name}"],
+            "resources": {"requests": requests},
+            "env": {"v": "1"},
+        }
+        if self.rng.random() < 0.6:
+            template["readiness_probe"] = {"exec": self._probe("flap"), "period_seconds": 1.0}
+        if self.rng.random() < 0.4:
+            template["liveness_probe"] = {
+                "exec": self._probe("sick"), "period_seconds": 1.0, "failure_threshold": 2,
+            }  # fmt: skip
+        surge, unavailable = self.rng.choice([(1, 0), (0, 1), (1, 1), (2, 0)])
         dep = Deployment.model_validate({
             "metadata": {"name": name},
-            "spec": {"replicas": replicas, "template": {
-                "command": [sys.executable, "-m", WORKLOAD, "--label", f"chaos-{name}"],
-                "resources": {"requests": requests},
-            }},
+            "spec": {"replicas": replicas, "template": template,
+                     "strategy": {"max_surge": surge, "max_unavailable": unavailable}},
         })  # fmt: skip
         with contextlib.suppress(StoreError):
             await self.api.create(dep)
             self.deployments.append(name)
-            self.note(f"deploy {name} x{replicas} {requests}")
+            self.note(
+                f"deploy {name} x{replicas} {requests} surge {surge} unavailable "
+                f"{unavailable} probes {sorted(k for k in template if 'probe' in k)}"
+            )
+
+    def _probe(self, fault: str) -> list[str]:
+        """An exec probe that fails while this node has the fault's flag file."""
+        flag = f"{self.flags}/{fault}-$CHRONOS_NODE_NAME"
+        return ["sh", "-c", f'test ! -e "{flag}"']
 
     # ---- faults and actions
 
-    async def _play(self, step: Step) -> None:  # noqa: PLR0912, PLR0915 (one per kind)
+    async def _play(self, step: Step) -> None:
         await clock.sleep(step.at)
         record = {**asdict(step), "started": round(self.now(), 3)}
         self.report.steps.append(record)
         name, d = step.target, step.duration
-        c = self.cluster
         self.note(f"{step.kind} {name} {d:g}s {step.arg or ''}".strip())
+        fault = step.kind not in ACTIONS
+        self.faults += fault
+        try:
+            await self._act(step)
+        finally:
+            self.faults -= fault
+            if fault:
+                self.last_fault = self.now()
+        record["ended"] = round(self.now(), 3)
+        self.note(f"healed {step.kind} {name}".strip())
+
+    async def _act(self, step: Step) -> None:  # noqa: PLR0912, PLR0915 (one per kind)
+        name, d = step.target, step.duration
+        c = self.cluster
         match step.kind:
             case "scale" if self.deployments:
                 await self._scale(self.rng.choice(self.deployments), step.arg["replicas"])
             case "deploy":
                 await self._deploy(f"d{len(self.deployments) + 1}", step.arg["replicas"] or 1)
+            case "update" if self.deployments:
+                await self._update(self.rng.choice(self.deployments), step.arg["version"])
+            case "flap" | "sick":
+                self.flags.mkdir(exist_ok=True)
+                flag = self.flags / f"{step.kind}-{name}"
+                flag.touch()
+                await clock.sleep(d)
+                flag.unlink(missing_ok=True)
             case "kill_cp" if self._cp_down:
                 self.note("skipped kill_cp: chronosd is still restarting")
             case "kill_cp":
@@ -318,8 +375,21 @@ class Chaos:
                 self.proxies[name].set(PASS)
             case _:
                 pass
-        record["ended"] = round(self.now(), 3)
-        self.note(f"healed {step.kind} {name}".strip())
+
+    async def _update(self, name: str, version: int) -> None:
+        """A template change: a rolling update."""
+        assert self.api is not None
+        for _ in range(10):
+            try:
+                dep = await self.api.get(Deployment, name)
+                dep.spec.template.env = {"v": str(version)}
+                await self.api.update(dep)
+                self.note(f"update {name} -> v{version}")
+                return
+            except Conflict:
+                continue
+            except StoreError:
+                return
 
     async def _scale(self, name: str, replicas: int) -> None:
         assert self.api is not None
@@ -338,6 +408,7 @@ class Chaos:
     async def _heal(self) -> None:
         for proxy in self.proxies.values():
             proxy.set(PASS)
+        shutil.rmtree(self.flags, ignore_errors=True)
         for name in self.names:
             self.cluster.signal_pods(name, signal.SIGCONT)
             with contextlib.suppress(OSError, ValueError):
@@ -381,6 +452,7 @@ class Chaos:
             for d in deps:
                 self.replicas_seen.setdefault(d.metadata.uid, []).append((now, d.spec.replicas))
             self._s3(pods, deps, procs, now)
+            self._s7(pods, deps, now)
         self._s12(procs)
         self._s4(procs, now)
 
@@ -432,11 +504,46 @@ class Chaos:
                 if w.label == f"chaos-{d.metadata.name}" and self._counted(w.node, now)
                 and not _terminating(by_uid.get(w.uid))
             ]  # fmt: skip
+            allowed += _surge(d, pods)  # a rollout may run replicas + max_surge
             if self._strike(f"S3/{uid}", len(mine) > allowed):
                 self.violation(
                     "S3",
                     f"deployment {d.metadata.name}: {len(mine)} processes > {allowed} replicas",
                 )
+
+    def _s7(self, pods: list[Pod], deps: list[Deployment], now: float) -> None:
+        """Rolling updates: surge always; availability only in calm windows, where no
+        fault can take readiness away, so any loss is the controller's doing."""
+        window = self.timings.termination_grace + 1.5
+        calm = self.faults == 0 and now - self.last_fault > SETTLE and not self._cp_down
+        for d in deps:
+            uid, surge = d.metadata.uid, _surge(d, pods)
+            active = [p for p in pods if p.metadata.owner == uid and is_active(p)]
+            replicas = max(
+                (r for t, r in self.replicas_seen.get(uid, []) if now - t <= window),
+                default=d.spec.replicas,
+            )
+            bad = bool(surge) and len(active) > replicas + surge
+            if self._strike(f"S7s/{uid}", bad):
+                self.violation(
+                    "S7", f"deployment {d.metadata.name}: {len(active)} active pods > "
+                    f"replicas {replicas} + max_surge {surge} during a rollout",
+                )  # fmt: skip
+            ready = sum(p.status.ready for p in active)
+            want = d.spec.replicas - d.spec.strategy.max_unavailable
+            if not calm or self.floor.get(uid, (-1, 0))[0] != d.spec.replicas:
+                # A new window (or a new target): from here on, ready may not fall below
+                # the floor, or below what it is now if that's lower (still coming up).
+                self.floor[uid] = (d.spec.replicas, min(want, ready)) if calm else (-1, 0)
+                self._strike(f"S7a/{uid}", False)
+                continue
+            floor = self.floor[uid][1]
+            if self._strike(f"S7a/{uid}", bool(surge) and ready < floor):
+                self.violation(
+                    "S7", f"deployment {d.metadata.name}: {ready} ready during a rollout in a "
+                    f"calm window < {floor} (replicas - max_unavailable = {want})",
+                )  # fmt: skip
+            self.floor[uid] = (d.spec.replicas, max(floor, min(want, ready)))
 
     def _s4(self, procs: list[Workload], now: float) -> None:
         t = self.timings
@@ -503,7 +610,12 @@ class Chaos:
                 for p in owned
                 if p.status.phase not in TERMINAL_PHASES and p.metadata.deletion_timestamp is None
             ]
-            if len(active) != d.spec.replicas:
+            if _surge(d, pods):
+                # Fine only if stuck on new pods that fit nowhere (as in the simulator).
+                if not any(not p.spec.node_name and p.status.reason == "Unschedulable"
+                           and not is_outdated(p, template_hash(d)) for p in active):  # fmt: skip
+                    return f"L2: the rollout of {d.metadata.name} didn't finish"
+            elif len(active) != d.spec.replicas:
                 return (
                     f"L2: {d.metadata.name} has {len(active)} active pods, wants {d.spec.replicas}"
                 )
@@ -563,6 +675,16 @@ async def _reap(proc: subprocess.Popen[bytes] | None) -> None:
     """Wait for a killed process without blocking the event loop (the checker runs on it)."""
     while proc is not None and proc.poll() is None:
         await clock.sleep(0.05)
+
+
+def _surge(d: Deployment, pods: list[Pod]) -> int:
+    """max_surge while `d` rolls out (some active pod has an old template), else 0."""
+    current = template_hash(d)
+    rolling = any(
+        p.metadata.owner == d.metadata.uid and is_active(p) and is_outdated(p, current)
+        for p in pods
+    )
+    return d.spec.strategy.max_surge if rolling else 0
 
 
 def _terminating(pod: Pod | None) -> bool:

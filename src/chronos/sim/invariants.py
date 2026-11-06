@@ -13,12 +13,14 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from chronos.api import Deployment, Node, NodeCondition, Pod, PodPhase
 from chronos.api.pod import TERMINAL_PHASES
 from chronos.api.quantity import is_extended
 from chronos.api.resources import add
+from chronos.core.reconcile import is_active, template_hash
+from chronos.core.rollout import is_outdated
 from chronos.core.schedule import Bind, NodeInfo, Profile, pick_node
 from chronos.store.kinds import NODE_INDEX, info
 
@@ -50,6 +52,7 @@ class Checker:
         self.replicas: dict[str, int] = {}  # deployment uid -> spec.replicas
         self.lowered: dict[str, tuple[int, float]] = {}  # uid -> (old replicas, allowed until)
         self.pods: dict[str, PodFacts] = {}
+        self.surge: dict[str, int] = {}  # deployment uid -> max_surge, while it rolls out (S7)
         self._checked_informers: dict[int, int] = {}
 
     # ---- after every event
@@ -83,7 +86,11 @@ class Checker:
                     raise Violation("S1", f"pod {pod.metadata.name} moved from {first} to {node}")
                 if pod.status.phase not in TERMINAL_PHASES:
                     used[node] = add(used.get(node, {}), pod.requests)
+        removed = [uid for uid, f in pods.items() if f.terminating and uid in self.pods
+                   and not self.pods[uid].terminating]  # fmt: skip
         self.pods = pods
+        if removed:
+            self._availability(store, removed)
         for name, total in used.items():
             n = nodes.get(name)
             capacity = n.spec.capacity if isinstance(n, Node) else {}
@@ -105,6 +112,66 @@ class Checker:
                 self.lowered[uid] = (old, now + self.w.scale_down_window)
             replicas[uid] = want
         self.replicas = replicas
+        self._surge(store)
+
+    def _surge(self, store: Any) -> None:
+        """S7, surge: during a rollout at most replicas + max_surge active pods (or the
+        old replicas + max_surge, within the scale-down window)."""
+        now = self.w.sim.now
+        by_owner: dict[str, list[Pod]] = {}
+        for pod in store.view(Pod).values():
+            if pod.metadata.owner and is_active(pod):
+                by_owner.setdefault(pod.metadata.owner, []).append(pod)
+        surge = {}
+        for dep in store.view(Deployment).values():
+            uid = dep.metadata.uid
+            active = by_owner.get(uid, [])
+            current = template_hash(dep)
+            if any(is_outdated(p, current) for p in active):
+                surge[uid] = dep.spec.strategy.max_surge
+            if uid not in surge:
+                continue  # not rolling out: S3 bounds the live processes
+            allowed = dep.spec.replicas
+            old, until = self.lowered.get(uid, (0, 0.0))
+            if now < until:
+                allowed = max(allowed, old)
+            allowed += surge[uid]
+            if len(active) > allowed:
+                raise Violation(
+                    "S7", f"deployment {dep.metadata.name}: {len(active)} active pods > "
+                    f"{allowed} (replicas {dep.spec.replicas} + max_surge {surge[uid]})",
+                )  # fmt: skip
+        self.surge = surge
+
+    def _availability(self, store: Any, removed: list[str]) -> None:
+        """S7, availability: when the deployment controller removes a pod it saw ready
+        during a rollout, its own cache must still show replicas - max_unavailable ready
+        pods (among those not removed). Judged on the controller's view, because that's
+        what it decides on; readiness lost behind its back is involuntary."""
+        cp = self.w.cp
+        if cp is None:
+            return
+        controller = cp.deployments
+        cached = {p.metadata.uid: p for p in controller._pods.list()}
+        deps = {d.metadata.uid: d for d in controller._deployments.list()}
+        live = {p.metadata.uid for p in store.view(Pod).values() if is_active(p)}
+        for uid in removed:
+            pod = cached.get(uid)
+            if pod is None or not pod.status.ready or pod.metadata.owner not in deps:
+                continue
+            dep = deps[pod.metadata.owner]
+            owned = [p for p in cached.values()
+                     if p.metadata.owner == dep.metadata.uid and is_active(p)]  # fmt: skip
+            if not any(is_outdated(p, template_hash(dep)) for p in owned):
+                continue  # not a rollout (a scale-down)
+            ready = sum(p.status.ready for p in owned if p.metadata.uid in live)
+            floor = dep.spec.replicas - dep.spec.strategy.max_unavailable
+            if ready < floor:
+                raise Violation(
+                    "S7", f"deployment {dep.metadata.name}: removed ready pod "
+                    f"{pod.metadata.name} leaving {ready} ready < replicas - max_unavailable "
+                    f"= {floor} (in the controller's own cache)",
+                )  # fmt: skip
 
     def _watches(self, store: object) -> None:
         """S6 at the consumer: an informer that says it has seen everything up to the
@@ -173,6 +240,7 @@ class Checker:
             old, until = self.lowered.get(uid, (0, 0.0))
             if now < until:
                 allowed = max(allowed, old)
+            allowed += self.surge.get(uid, 0)  # a rollout may run replicas + max_surge (S7)
             if count > allowed:
                 raise Violation(
                     "S3", f"deployment {uid}: {count} live processes > {allowed} replicas"
@@ -214,7 +282,24 @@ class Checker:
                 p for p in owned
                 if p.status.phase not in TERMINAL_PHASES and p.metadata.deletion_timestamp is None
             ]  # fmt: skip
-            if len(active) != dep.spec.replicas:
+            current = template_hash(dep)
+            if any(is_outdated(p, current) for p in active):
+                # An unfinished rollout is fine only if it's stuck on new pods that fit
+                # nowhere (L3 below checks they really don't): with a full cluster and the
+                # old pods holding the floor, there's no move that keeps S7 (Kubernetes
+                # stalls the same way).
+                if not any(not p.spec.node_name and not is_outdated(p, current) for p in active):
+                    raise Violation(
+                        "L2", f"deployment {dep.metadata.name}: the rollout didn't finish, and "
+                        "no new pod is waiting for room",
+                    )  # fmt: skip
+                bound = dep.spec.replicas + dep.spec.strategy.max_surge
+                if len(active) > bound:
+                    raise Violation(
+                        "L2", f"deployment {dep.metadata.name}: {len(active)} active pods "
+                        f"> {bound} mid-rollout",
+                    )  # fmt: skip
+            elif len(active) != dep.spec.replicas:
                 raise Violation(
                     "L2",
                     f"deployment {dep.metadata.name}: {len(active)} active pods, "

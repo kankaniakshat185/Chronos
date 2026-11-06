@@ -51,12 +51,18 @@ age per node, fencing events, allocated vs capacity per resource, and WAL fsync 
 
 | Command | What it does |
 |---------|--------------|
-| `apply -f FILE` | create or update (compare-and-swap, retried on conflict) |
+| `apply -f FILE` | create or update (compare-and-swap, retried on conflict); a deployment's template change rolls out under its `max_surge` / `max_unavailable` |
 | `get KIND [NAME] [-o table\|wide\|yaml\|json] [--watch]` | nodes, pods, deployments, events, or any registered kind |
 | `describe KIND NAME` | the whole object, plus its events (e.g. why a pod is Pending) |
 | `logs POD [--stderr]` | the workload's output (local mode: agents on this machine) |
 | `scale deployment NAME --replicas N`, `delete KIND NAME` | |
 | `cordon NODE`, `uncordon NODE` | stop or resume new placements on a node |
+| `drain NODE` | cordon, then move every pod off (each is re-created elsewhere by its controller) |
+
+Pods can have **readiness and liveness probes** (exec, HTTP GET or TCP, with thresholds): a pod
+is ready, and counts for a rollout, only once its readiness probe passes; failing liveness
+restarts it. A **memory limit** is enforced by polling resident memory every 0.5 s; a pod over
+it is killed and ends `OOMKilled`.
 
 Examples in [`examples/`](examples/): `hello` (one pod), `web`, `slot-demo`, `crashy`
 (crash-loop back-off and its events), `big` (unschedulable, and `describe` says why).
@@ -170,9 +176,9 @@ have been replaced by the designs they stood in for.
 | **S8** an acknowledged write survives a control-plane crash; nothing half-written is applied | ✅ | [crash at 7 crash points x 50 seeds, recover, compare with a reference run](tests/durability/test_crash_recovery.py) (`make test-durability`); [recovery from every truncation offset, bit flips, disk full, restart equivalence](tests/property/test_wal_props.py) |
 | **L4** the cluster reconverges after a control-plane restart | ✅ | [back within F: same PIDs; down longer: everything fenced, then the same pods restart on their nodes; crash mid scale-up: exactly 20 pods](tests/integration/test_control_plane_restart.py) |
 | **S6** a watch from revision r delivers every change after r, in order, or fails with `410 Gone`; it never silently skips | ✅ | [replay from every revision of random histories, whole kind, node filter and small batches](tests/property/test_watch_props.py); [both clients, long-poll wake-up, compaction](tests/contract/test_store_client.py); [informer relists after 410 and after a restart](tests/unit/test_runtime.py) |
-| **S7** | ❌ not yet | rollouts: see Limitations |
+| **S7** during a rolling update, at most `replicas + max_surge` pods, and ready pods are never voluntarily taken below `replicas - max_unavailable` | ✅ | [rollout properties](tests/property/test_rollout_props.py), [real processes, sampled](tests/integration/test_tier2.py); the simulator and the chaos checker |
 
-Every safety row above (S1-S6, S8, S11, S12) is also checked by the [simulator](tests/sim/test_sim.py) after every event of every seed, and L1-L3 and L5 at the end of each run.
+Every safety row above (S1-S8, S11, S12) is also checked by the [simulator](tests/sim/test_sim.py) after every event of every seed, and L1-L3 and L5 at the end of each run.
 
 **Modularity:** a resource that exists only in test code, `example.com/widget`, plus a
 test-only scheduler plugin, pass the scheduling and bind properties with no production-code
@@ -192,10 +198,11 @@ on Ubuntu and macOS.
 **The simulator** (`python -m chronos.sim --seed N`, [ADR-0016](docs/adr/0016-deterministic-simulation-testing.md)) runs the
 *real* store (WAL and recovery included), controllers and agent under virtual time and one
 seeded RNG. It injects node, agent and control-plane crashes, pauses, whole-node freezes,
-partitions, delay spikes, drops and workload crash storms, and checks S1-S6, S8, S11 and S12
-after every event, then L1-L3 and L5 once the run is quiet. Any failure replays exactly from
-its seed and can be shrunk with `--minimize`. Ten **canary bugs** (fencing off, expectations off,
-no bind capacity check, F > E, ack before fsync, ...) must each be detected; they are, within
+partitions, delay spikes, drops, workload crash storms and failing probes, alongside template
+updates (rolling updates mid-fault), and checks S1-S8, S11 and S12 after every event, then
+L1-L3 and L5 once the run is quiet. Any failure replays exactly from
+its seed and can be shrunk with `--minimize`. Eleven **canary bugs** (fencing off, expectations off,
+no bind capacity check, F > E, ack before fsync, a rollout ignoring `max_unavailable`, ...) must each be detected; they are, within
 the first six seeds. On its first runs it found three real bugs, now fixed and replayed on
 every PR ([`tests/sim/regressions.txt`](tests/sim/regressions.txt)). CI: 200 seeds per PR,
 10 000 nightly.
@@ -203,8 +210,9 @@ every PR ([`tests/sim/regressions.txt`](tests/sim/regressions.txt)). CI: 200 see
 **Chaos on real processes** (`python -m chronos.testing.chaos --seed N --duration 600`): a real
 `chronosd` and agents, each agent's link through a [fault proxy](src/chronos/testing/faultproxy.py)
 (delay, drop, blackhole, reset), under a seeded schedule of kill -9 (agent, whole node,
-`chronosd`), SIGSTOP of an agent or of a whole node, link faults and crash storms. A live
-checker reads the store and the OS process table every 200 ms (S1-S4, S11, S12), then checks
+`chronosd`), SIGSTOP of an agent or of a whole node, link faults, crash storms and failing
+probes, with rolling updates mid-run. A live checker reads the store and the OS process table
+every 200 ms (S1-S4, S7, S11, S12), then checks
 liveness after the heal, and writes a report and a timeline. A planted rogue process proves
 it can see a violation. CI: 60 s per PR, 3 x 10 min nightly.
 
@@ -216,10 +224,11 @@ throughput, WAL cost, recovery time) with methodology, raw samples and interpret
 
 > **What this does NOT do yet.** Each item names the planned fix. PM-1 closed the items
 > about fencing, crash backoff and one-phase deletion; PM-2 closed durability; PM-3 closed
-> polling; PM-5 closed metrics and dashboards; PM-6 closed chaos testing and benchmarks.
+> polling; PM-5 closed metrics and dashboards; PM-6 closed chaos testing and benchmarks;
+> PM-9a closed probes, rolling updates, memory limits and drain.
 
 1. **No GPU/CUDA support: planned, Stage 2 (deferred).** Nothing detects or uses GPUs, and no CUDA runs. Stage 1 provides the seams GPU support plugs into: extended resources (X-1/X-2), workload types (X-4) and resource providers (X-5), proven in-process by PX.9 ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)).
-2. **No resource isolation or enforcement.** CPU, memory and extended-resource requests are used for *placement accounting only*; a process can use more than it requested. → memory-limit enforcement PM-9a (P10.3); CPU stays advisory (ADR-0014).
+2. **Little resource isolation.** Requests are used for placement accounting. Memory **limits** are enforced, but by polling resident memory every 0.5 s and killing the pod (OOMKilled), not by a cgroup: a fast allocation can overshoot for up to one interval. CPU stays advisory: a process can use more than it requested (ADR-0014).
 3. **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → Backlog (P11.x, ADR-0018); not scheduled.
 4. **No jobs / run-to-completion workloads: planned, Stage 2 (deferred)** (ADR-0020). Only long-running Deployments. The kind and controller registries (X-6, built in PM-3) make Jobs purely additive.
 5. **Scheduling policies are generic.** `LeastAllocated` (spread, default) or `MostAllocated` (pack), chosen with `chronosd --scheduler-policy`. Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
@@ -246,7 +255,9 @@ The block names used above, in build order:
 | **PM-4** ✅ | Deterministic simulation with canary bugs |
 | **PM-5** ✅ | Full CLI, structured logs, events, `/metrics`, Prometheus + Grafana |
 | **PM-6** ✅ | Chaos harness (partitions, pauses, delays) and benchmarks |
-| **PM-9** | Probes, rolling updates, memory limits, drain; final write-up |
+| **PM-9a** ✅ | Probes, rolling updates (S7), memory limits, drain |
+| **PM-9b** | Seam proof: a test-only resource, workload type and provider through scheduling, bind and the simulator, unchanged |
+| **PM-9c** | Final write-up |
 | Stage 2 | GPU-aware scheduling and CUDA workloads, on the seams above (deferred) |
 
 ## Layout

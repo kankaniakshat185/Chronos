@@ -92,7 +92,7 @@ def demo_cluster(store: Store, clock: FakeClock) -> None:
             {"metadata": {"name": "web"}, "spec": {"replicas": 3, "template": {"command": ["x"]}}}
         )
     )
-    dep.status.replicas, dep.status.ready_replicas = 3, 2
+    dep.status.replicas, dep.status.ready_replicas, dep.status.updated_replicas = 3, 2, 3
     store.update_status(dep)
     clock.advance(3 * 3600)
 

@@ -40,6 +40,7 @@ class LocalProc:
     restarts: int = 0  # what the pod's restart_count should say
     crashes: int = 0  # consecutive quick crashes that led to this run
     assigned: Mapping[str, list[str]] = field(default_factory=dict)  # provider units (X-5)
+    reason: str = ""  # why it exited, when the agent knows better than the code (OOMKilled)
 
     @property
     def running(self) -> bool:
@@ -108,10 +109,10 @@ def restarts_after(pod: Pod, exit_code: int) -> bool:
             return False
 
 
-def _running(pod: Pod, proc: LocalProc) -> PodStatus:
+def _running(pod: Pod, proc: LocalProc, ready: bool) -> PodStatus:
     status = pod.status.model_copy()
     status.phase, status.reason, status.message = PodPhase.RUNNING, "", ""
-    status.pid, status.exit_code, status.ready = proc.pid, None, True  # no probes until Tier 2
+    status.pid, status.exit_code, status.ready = proc.pid, None, ready
     status.restart_count = proc.restarts
     status.assigned = {name: list(units) for name, units in proc.assigned.items()}
     return status
@@ -123,6 +124,9 @@ def _final(pod: Pod, proc: LocalProc, code: int) -> PodStatus:
     status.restart_count, status.assigned = proc.restarts, {}  # units freed on exit
     if code == 0:
         status.phase, status.reason, status.message = PodPhase.SUCCEEDED, "Completed", ""
+    elif proc.reason:
+        status.phase, status.reason = PodPhase.FAILED, proc.reason
+        status.message = f"{proc.reason} (exit code {code})"
     else:
         status.phase, status.reason = PodPhase.FAILED, "Exited"
         status.message = f"killed by signal {-code}" if code < 0 else f"exited with code {code}"
@@ -134,7 +138,8 @@ def _waiting(pod: Pod, proc: LocalProc, code: int, delay: float) -> PodStatus:
     status.phase, status.reason, status.ready = PodPhase.RUNNING, CRASH_LOOP, False
     status.pid, status.exit_code, status.restart_count = proc.pid, code, proc.restarts
     status.assigned = {}  # units freed on exit
-    status.message = f"back-off {delay:g}s before restarting (last exit code {code})"
+    why = f"{proc.reason}, " if proc.reason else ""
+    status.message = f"back-off {delay:g}s before restarting ({why}last exit code {code})"
     return status
 
 
@@ -159,7 +164,11 @@ def plan(
     procs: dict[str, LocalProc],
     now: float = 0.0,
     backoff: Backoff | None = None,
+    *,
+    ready: Mapping[str, bool] | None = None,
 ) -> list[Action]:
+    """`ready`: readiness by pod uid from the agent's probes (P10.1); a running pod with
+    no readiness probe (missing from the map) is ready."""
     b = backoff or Backoff()
     desired = {p.metadata.uid: p for p in pods if is_desired(p, node)}
     actions: list[Action] = []
@@ -172,7 +181,7 @@ def plan(
             actions.append(Forget(uid))  # stopped by fencing: start again once it's safe
             continue
         if proc.exit_code is None:
-            status = _running(pod, proc)
+            status = _running(pod, proc, True if ready is None else ready.get(uid, True))
             if status != pod.status:
                 actions.append(Report(pod.model_copy(update={"status": status}, deep=True)))
             continue

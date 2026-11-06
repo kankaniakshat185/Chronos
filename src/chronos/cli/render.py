@@ -82,12 +82,13 @@ def deployments(items: Sequence[Deployment], now: datetime) -> str:
         [
             d.metadata.name,
             f"{d.status.ready_replicas}/{d.spec.replicas}",
+            str(d.status.updated_replicas),
             str(d.status.replicas),
             age(d.metadata.created_at, now),
         ]
         for d in items
     ]
-    return table(["NAME", "READY", "ACTIVE", "AGE"], rows)
+    return table(["NAME", "READY", "UP-TO-DATE", "ACTIVE", "AGE"], rows)
 
 
 def events(items: Sequence[Event], now: datetime) -> str:

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from chronos.agent.agent import Agent
+from chronos.agent.probing import Prober
 from chronos.agent.providers import Providers
 from chronos.api import Pod
 from chronos.common.config import FencingConfig
@@ -63,6 +64,8 @@ class SimNode:
         self.lease: float | None = None  # the agent's lease file: survives the agent
         self.procs: dict[int, SimProcess] = {}  # live ones
         self.frozen = False
+        self.flapping = False  # its pods' readiness probes fail (a fault, P10.5)
+        self.sick = False  # its pods' liveness probes fail
         self.resumed_at = -math.inf
         self.agent: SimAgent | None = None
         self._deferred: list[Callable[[], None]] = []
@@ -232,6 +235,9 @@ class SimRuntime:
         if proc is not None:
             self._node.terminate(proc, fenced=fenced, grace=self._grace)
 
+    def enforce_memory(self) -> list[str]:
+        return []  # the simulator doesn't model memory
+
     def kill_now(self, uid: str) -> None:
         self._fenced.add(uid)
         proc = self._live.get(uid)
@@ -277,6 +283,7 @@ class AgentSettings:
     request_timeout: float
     heartbeat_timeout: float
     patches: list[Callable[[Agent], None]] = field(default_factory=list)  # canaries
+    prober: Prober | None = None  # the simulated one (P10.1)
 
 
 class SimAgent:
@@ -312,6 +319,7 @@ class SimAgent:
             watch_wait=settings.watch_wait,
             rng=random.Random(sim.rng.random()),
             new_epoch=new_epoch,
+            prober=settings.prober,
         )
         for patch in settings.patches:
             patch(self.agent)
@@ -342,6 +350,7 @@ class SimAgent:
             "fence",
         )
         self._spawn(self.agent.pods.run(), "informer")
+        self._spawn(self.agent._every(0.5, self.agent.probe_once), "probes")
         self._spawn(self._sync(), "sync")
 
     async def _sync(self) -> None:

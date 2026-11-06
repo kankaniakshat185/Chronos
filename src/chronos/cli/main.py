@@ -13,11 +13,12 @@ import typer
 
 from chronos import __version__
 from chronos.api import ApiObject, Deployment, Event, Node, Pod
+from chronos.api.pod import TERMINAL_PHASES
 from chronos.cli import render
 from chronos.cli.manifest import ManifestError, load
 from chronos.client.http import HttpStoreClient
 from chronos.common.clock import Clock, RealClock
-from chronos.store import AlreadyExists, Compacted, Conflict, StoreError
+from chronos.store import AlreadyExists, Compacted, Conflict, NotFound, StoreError
 from chronos.store.errors import Unavailable
 from chronos.store.kinds import lookup
 
@@ -244,6 +245,47 @@ def cordon(ctx: typer.Context, node: str) -> None:
 def uncordon(ctx: typer.Context, node: str) -> None:
     """Let new pods land on a node again."""
     _set_unschedulable(ctx, node, value=False)
+
+
+@app.command()
+def drain(
+    ctx: typer.Context,
+    node: str,
+    timeout: Annotated[float, typer.Option(help="Seconds to wait for each pod to stop.")] = 60.0,
+) -> None:
+    """Cordon a node, then evict its pods one at a time (P10.4).
+
+    Each pod is deleted (its agent stops the process, two-phase) and waited for before the
+    next, so a deployment loses at most one replica at a time to the drain; its controller
+    recreates the pod on another node. Run `uncordon` to use the node again.
+    """
+    _set_unschedulable(ctx, node, value=True)
+
+    async def work(client: HttpStoreClient) -> None:
+        pods, _ = await client.list(Pod, node_name=node)
+        victims = [
+            p for p in pods
+            if p.status.phase not in TERMINAL_PHASES and p.metadata.deletion_timestamp is None
+        ]  # fmt: skip
+        for pod in victims:
+            name = pod.metadata.name
+            try:
+                await client.delete(Pod, name)
+            except NotFound:
+                continue
+            start = clock.monotonic()
+            while clock.monotonic() - start < timeout:
+                try:
+                    await client.get(Pod, name)
+                except NotFound:
+                    break
+                await clock.sleep(0.1)
+            else:
+                raise StoreError(f"pod/{name} still there after {timeout:g}s; drain stopped")
+            typer.echo(f"pod/{name} evicted")
+        typer.echo(f"node/{node} drained ({len(victims)} pods)")
+
+    _run(ctx, work)
 
 
 @app.command()

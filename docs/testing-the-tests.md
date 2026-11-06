@@ -2,7 +2,7 @@
 
 Chronos makes strong claims: "never more than R replicas", "an acknowledged write survives a crash", "a pod never lands on a node without enough slots". Each claim is backed by tests. But a passing test only proves something if it *would fail* when the claim breaks. This log records how that was checked: by deliberately breaking the code that upholds each claim and confirming that a test notices.
 
-It covers the MVP through PM-6 (55 hand-made mutations plus the simulator's 10 canaries so far), and gets a new entry every time a guarantee is added.
+It covers the MVP through PM-9a (67 hand-made mutations plus the simulator's 11 canaries so far), and gets a new entry every time a guarantee is added.
 
 ---
 
@@ -141,6 +141,23 @@ For this block the mutations were run by a small script (kept outside the repo) 
 | 54 | A terminating pod's process isn't a duplicate | the checker counts terminating pods | checker unit tests | ✅ caught |
 | 55 | The checker sees violations on real processes, not just synthetic ones | a rogue workload started behind Chronos's back | `test_the_checker_catches_a_rogue_workload` | ✅ caught live as S3, and as an L5 orphan after the heal |
 
+### PM-9a: Tier 2 (probes, rolling updates, memory limits) and S7
+
+| # | Guarantee | Injected bug | Expected to catch | Result |
+|---|---|---|---|---|
+| 56 | A rollout keeps `replicas - max_unavailable` ready (S7) | `may_take = ready`: ready old pods removed regardless of the floor | rollout properties, the real-process rollout test | ✅ caught by both (the real-process test saw `worst_ready` fall below 3); the simulator's `rollout_ignores_max_unavailable` canary is the same bug |
+| 57 | A rollout never runs more than `replicas + max_surge` pods (S7) | `create = replicas - len(new)`: new pods created without the surge bound | rollout properties, the simulator | ✅ caught; the simulator found it on 6 of the first 40 seeds as S7 ("10 active pods > 6") |
+| 58 | A rollout with `max_surge = 0` still makes progress | the removal budget counted from `replicas` instead of `replicas - max_unavailable` | the progress property | ✅ caught. This was a real bug in my first draft, spotted while reading the code before any test ran; the mutation confirms the property would have found it |
+| 59 | Old pods that are still starting aren't all thrown away at once (at least `replicas - max_unavailable` pods stay) | no floor on the removal budget | rollout properties, the simulator, the real-process test | ❌ **survived** everything; caught after a new property (see 3.10) |
+| 60 | Ready only after `success_threshold` successes in a row | ready on the first success | probe unit tests | ✅ caught |
+| 61 | `failure_threshold` liveness failures restart the process | liveness failures ignored | the agent's probe unit test, the real-process liveness test | ✅ caught by both |
+| 62 | A process over its memory limit is killed, recorded as OOMKilled | the RSS check never fires | the real-process memory test | ✅ caught |
+| 63 | Upgrading Chronos doesn't roll out every deployment | the template hash includes the new probe fields even when they're unset | unit and property tests | ❌ **survived**; caught after a test pinned the hash the code before probes computed (see 3.11) |
+| 64 | Readiness lost under a fault isn't blamed on the controller | the chaos checker judges availability while faults are active | chaos checker unit tests | ✅ caught |
+| 65 | A rollout's surge isn't counted as duplicate processes | S3 without the surge allowance | chaos checker unit tests | ✅ caught |
+| 66 | The chaos checker sees a surge breach | S7 surge never flagged | chaos checker unit tests | ✅ caught |
+| 67 | The chaos checker sees ready pods pushed below the floor in a calm window | S7 availability never flagged | chaos checker unit tests | ✅ caught |
+
 ### PM-4: canaries (the simulator's own "test the tests", TESTING.md 6.5)
 
 Each canary switches off one protection inside the simulator, and the simulator must report a violation of the expected invariant. Measured over the first 40 seeds:
@@ -157,10 +174,13 @@ Each canary switches off one protection inside the simulator, and the simulator 
 | `provider_reuse_unit` (counting provider always returns unit 0) | S12 | 13/40 | 1 |
 | `ack_before_fsync` (the WAL acks without syncing) | S8 | 13/40 | 5 |
 | `watch_skip_on_compaction` (no 410) | S6 | 2/40 | 4 |
+| `rollout_ignores_max_unavailable` (PM-9a: old pods removed as if `max_unavailable = replicas`) | S7 | 22/40 | 0 |
+
+Since PM-9a, `disable_expectations` is also caught as S7 (10 of its 14 detections in the first 40 seeds): without expectations, the controller over-creates during a rollout too, which breaks the surge bound. S7 was added to its expected set.
 
 `tests/sim/test_canaries.py` scans seeds from 0 for each canary and fails if its whole budget (200-1 000 seeds) passes clean. Two canaries started at 0/40; neither could be fixed by changing the canary (see 4.10 and 4.11).
 
-**Score:** of 53 code mutations, 42 were caught on the first try and 11 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4, 1 in PM-5, 2 in PM-6). Every survivor led to a new or redesigned test, and all 53 are caught now. (#55 plants a fault instead of changing code.) One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
+**Score:** of 65 code mutations, 52 were caught on the first try and 13 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4, 1 in PM-5, 2 in PM-6, 2 in PM-9a). Every survivor led to a new or redesigned test, and all 65 are caught now. (#55 plants a fault instead of changing code.) One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
 
 ---
 
@@ -212,6 +232,16 @@ In the first batch, #39 and #40 were both reported "caught", by `test_sigterm_ig
 **Why it survived:** the test's stale batch was a DELETED event for an object the newer list held at a higher `resource_version`, so the per-object version check skipped it anyway. That's defence in depth again (see 3.2). The damaging case is a stale MODIFIED for an object the newer list no longer has: with no current object to compare against, it would be resurrected.
 **Fix:** the test now uses exactly that case. **Lesson:** a race test has to deliver the stale message that does damage, not just *a* stale message.
 
+### 3.10 A rollout floor no test could see (#59)
+**Bug:** without the floor on the removal budget, a rollout that starts while the old pods are still starting (not ready yet) deletes all of them at once.
+**Why it survived:** every test started its rollout from old pods that were all ready, and for ready pods a second guard (`may_take`) gives the same answer. The budget only matters for old pods that aren't ready, which no test had. The real-process test and the simulator didn't reach it either.
+**Fix:** a property starts the rollout from old pods with random readiness and checks that at least `replicas - max_unavailable` pods remain after one step (Kubernetes bounds its clean-up of unhealthy old pods the same way). **Lesson:** when two guards overlap, each needs a test where only it stands between the code and the bug.
+
+### 3.11 An upgrade that would roll out every deployment (#63)
+**Bug:** adding the probe fields to the pod template changes the JSON every template hashes to, even when they're unset, so after an upgrade every pod looks outdated and every deployment rolls out for nothing.
+**Why it survived:** every test computes its hashes with the code under test, so old and new always agree with each other.
+**Fix:** a unit test pins the hash that the previous commit's code computes for a fixed template (`340494c604`, computed by running the old code from `git archive`). **Lesson:** compatibility across versions can't be tested inside one version; pin a value from the old one.
+
 ---
 
 ## 4. Tests that were wrong
@@ -259,6 +289,15 @@ Running three 5-node chaos runs in parallel on the laptop (about 150 Python proc
 
 ### 4.15 A timing guarantee whose margin wasn't met (PM-6)
 After the parallel runs were stopped, a single 10-minute run still reported S3 and S4: a workload ran 3.6 s after its node's last accepted heartbeat (bound 2.1 s), and one deployment briefly had 6 processes for 5 replicas. The trace showed the machine stalling: load average 74, three nodes going Unknown in the same instant, a restarted agent taking 2 s just to start Python. The shims fenced, but a second late. Fencing is a timing guarantee, F + K + drift < E, and the **drift margin** is the slack for exactly this; the chaos runner had been using the test fixture's 0.2 s. **Fix:** chaos runs on the demo's timings (drift margin 1 s; production also uses 1 s, with E = 10 s), and the S4 bound includes the drift margin. **Lesson:** when a real-time guarantee fails, check its preconditions before its implementation, and say which one failed.
+
+### 4.16 A liveness check that demanded the impossible (PM-9a)
+The first sweep with rolling updates failed seeds 8 and 9 with L2: "6 active pods, wants 4". The traces showed a full cluster: the new pods were Pending (Unschedulable) because the old pods held the resources, and with the old pods at the floor (`replicas - max_unavailable` ready) the controller may not remove another. No move both makes progress and keeps S7. Kubernetes stalls the same way and reports the rollout as past its progress deadline. **Fix:** an unfinished rollout passes liveness only while a new pod is pending and fits no node (L3 still checks that it really doesn't fit), with at most `replicas + max_surge` pods; in both the simulator and the chaos harness. **Lesson:** a liveness property has to allow for the states where safety forbids every way forward.
+
+### 4.17 A new check that took over an old canary (PM-9a)
+The first version of the S7 surge check counted active pods against `replicas` even outside rollouts. `disable_expectations` then went undetected in 500 seeds: it was caught 334 times, but always as S7, which isn't in its expected set. Outside a rollout the bound is S3's, so the surge check now runs only during rollouts. Inside one, the over-creation really is an S7 breach, so S7 joined the canary's expected set.
+
+### 4.18 Regression seeds that silently changed meaning (PM-9a)
+`tests/sim/regressions.txt` replays seeds by number, and a seed's schedule comes from the generator. Adding the Tier 2 actions to the generator's random stream gave every seed a new schedule, so seeds 9, 24 and 25 no longer replayed the schedules that found their bugs, and nothing failed. A test also broke: the minimizer could no longer shrink seed 1's failure to a single deploy. **Fix:** the Tier 2 actions come from a second random stream (`scenario-<seed>-tier2`). Every seed keeps its old schedule entry for entry, checked across 300 seeds against the previous commit's generator, and only gains entries. **Lesson:** a regression list that stores seeds depends on the generator; extend the generator without disturbing what it already produces.
 
 ### 4.12 The simulator hung (PM-4)
 One seed under `fence_after_eviction` pegged a CPU forever. A simulated process start took zero time, so "kill past E" and "start again" alternated at one virtual instant without end. Starts now take 1-20 ms (fork + exec), and the engine raises a `SimError` for a livelock (100 000 events at one instant) or a runaway (2 million events) instead of hanging. **Lesson:** a test harness needs its own guard against running forever.

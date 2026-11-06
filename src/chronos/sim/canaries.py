@@ -20,6 +20,7 @@ from chronos.api.resources import insufficient
 from chronos.client import local as local_module
 from chronos.controllers.deployment import DeploymentController
 from chronos.controllers.scheduler import SchedulerController
+from chronos.core import rollout as rollout_module
 from chronos.core.schedule import NodeInfo, Profile, SchedulerConfig, resolve
 from chronos.store import store as store_module
 from chronos.store.errors import EpochMismatch, NotFound, StoreError
@@ -38,7 +39,8 @@ CANARIES = {
     c.name: c
     for c in [
         Canary("disable_fencing", frozenset({"S3", "S4"}), 200, "agent and shims never fence"),
-        Canary("disable_expectations", frozenset({"S3", "L2"}), 500, "expectations always met"),
+        Canary("disable_expectations", frozenset({"S3", "S7", "L2"}), 500,
+               "expectations always met"),
         Canary("skip_bind_capacity_check", frozenset({"S2", "S11"}), 500,
                "no capacity re-check in bind, and no assume cache (stale scheduler cache)"),
         Canary("fence_after_eviction", frozenset({"S3", "S4"}), 200,
@@ -54,6 +56,9 @@ CANARIES = {
                "extended resources are ignored by the fit filter and the bind re-check"),
         Canary("provider_reuse_unit", frozenset({"S12"}), 200,
                "the counting provider always hands out unit 0"),
+        Canary("rollout_ignores_max_unavailable", frozenset({"S7"}), 200,
+               "a rolling update removes old pods without keeping replicas - max_unavailable "
+               "ready"),
     ]
 }  # fmt: skip
 
@@ -110,7 +115,7 @@ def _cpu_memory_fit(pod: Any, node: NodeInfo) -> str | None:
 
 
 @contextlib.contextmanager
-def active(name: str | None) -> Iterator[Hooks]:  # noqa: PLR0912 (one case per canary)
+def active(name: str | None) -> Iterator[Hooks]:  # noqa: PLR0912, PLR0915 (one case per canary)
     """Apply canary `name` (or none) for one run; undo every global patch afterwards."""
     hooks = Hooks(profile=resolve(SchedulerConfig()))
     undo: list[Callable[[], None]] = []
@@ -176,6 +181,15 @@ def active(name: str | None) -> Iterator[Hooks]:  # noqa: PLR0912 (one case per 
             )
         case "provider_reuse_unit":
             patch(providers_module.CountingProvider, "allocate", lambda self, uid, n: ["0"] * n)
+        case "rollout_ignores_max_unavailable":
+            real_step = rollout_module.step
+
+            def step(dep: Any, active: Any, current_hash: str) -> Any:
+                careless = dep.model_copy(deep=True)  # no validation: any value goes
+                careless.spec.strategy.max_unavailable = dep.spec.replicas
+                return real_step(careless, active, current_hash)
+
+            patch(rollout_module, "step", step)
         case _:
             raise KeyError(f"unknown canary {name!r}; known: {', '.join(sorted(CANARIES))}")
     try:

@@ -27,6 +27,7 @@ import random
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 
+from chronos.agent.probing import Prober, RealProber
 from chronos.agent.providers import ProviderError
 from chronos.agent.runtime import ProcessRuntime
 from chronos.api import Node, ObjectMeta, Pod, PodPhase
@@ -37,12 +38,25 @@ from chronos.common.clock import Clock
 from chronos.common.config import FencingConfig
 from chronos.common.metrics import AGENT_FENCE_EVENTS, AGENT_HEARTBEAT_FAILURES
 from chronos.controllers.runtime import Informer, Signal
-from chronos.core.agent_sync import CRASH_LOOP, Backoff, Finalize, Forget, Report, Start, Stop, plan
+from chronos.core.agent_sync import (
+    CRASH_LOOP,
+    Backoff,
+    Finalize,
+    Forget,
+    LocalProc,
+    Report,
+    Start,
+    Stop,
+    plan,
+)
 from chronos.core.fencing import should_fence
+from chronos.core.probes import ProbeState, due, liveness_failed, observe
 from chronos.store import Invalid, NotFound, StoreError
 from chronos.store.errors import EpochMismatch, Unavailable
 
 log = logging.getLogger(__name__)
+PROBE_TICK = 0.1  # how often the agent looks for due probes
+MEMORY_TICK = 0.5  # how often the agent checks resident memory against limits (P10.3)
 
 
 def heartbeat_timeout(interval: float, fence_timeout: float) -> float:
@@ -73,6 +87,7 @@ class Agent:
         resync_interval: float = 1.0,
         backoff: Backoff | None = None,
         watch_wait: float = 30.0,
+        prober: Prober | None = None,
         rng: random.Random | None = None,
         new_epoch: Callable[[], str] = lambda: uuid.uuid4().hex,
     ) -> None:
@@ -97,6 +112,8 @@ class Agent:
             client, Pod, clock, node_name=name, watch_wait=watch_wait, rng=self._rng
         )
         self._wake = Signal()
+        self._prober = prober or RealProber()
+        self._probes: dict[tuple[str, int, str], ProbeState] = {}  # (uid, pid, kind)
         self.pods.add_handler(lambda _old, _new: self._wake.notify())
         runtime.on_change = self._wake.notify
 
@@ -206,7 +223,10 @@ class Agent:
         running = sum(p.running for p in procs.values())
         self.stats = {"running": running, "exited": len(procs) - running}  # replaced, not mutated
         now = self._clock.monotonic()
-        for action in plan(self.name, pods, self._runtime.snapshot(), now, self._backoff):
+        procs = self._runtime.snapshot()
+        for action in plan(
+            self.name, pods, procs, now, self._backoff, ready=self._readiness(pods, procs)
+        ):
             match action:
                 case Start(pod=pod, restarts=restarts, crashes=crashes) if not self.fenced:
                     await self._start(pod, restarts, crashes)
@@ -244,6 +264,61 @@ class Agent:
         if pod.status.reason == CRASH_LOOP:
             await self.events.record(pod, "BackOff", pod.status.message, "Warning")
 
+    async def memory_once(self) -> None:
+        for name in self._runtime.enforce_memory():
+            pod = self.pods.get(name)
+            if pod is not None:
+                await self.events.record(pod, "OOMKilled", "memory above its limit", "Warning")
+
+    # ---- probes (P10.1)
+
+    def _readiness(self, pods: list[Pod], procs: Mapping[str, LocalProc]) -> dict[str, bool]:
+        """Pods with a readiness probe are ready only once it passes, per process: a
+        restarted process starts not ready."""
+        ready = {}
+        for pod in pods:
+            proc = procs.get(pod.metadata.uid)
+            if pod.spec.readiness_probe is not None and proc is not None:
+                state = self._probes.get((pod.metadata.uid, proc.pid, "readiness"))
+                ready[pod.metadata.uid] = state is not None and state.passing
+        return ready
+
+    async def probe_once(self) -> None:
+        """Run the probes that are due, one after another (each bounded by its timeout)."""
+        if not self.pods.has_synced:
+            return
+        by_uid = {p.metadata.uid: p for p in self.pods.list()}
+        live: set[tuple[str, int, str]] = set()
+        changed = False
+        for uid, proc in sorted(self._runtime.snapshot().items()):
+            pod = by_uid.get(uid)
+            if pod is None or not proc.running:
+                continue
+            for kind, probe in (("readiness", pod.spec.readiness_probe),
+                                ("liveness", pod.spec.liveness_probe)):  # fmt: skip
+                if probe is None:
+                    continue
+                key = (uid, proc.pid, kind)
+                live.add(key)
+                state = self._probes.get(key, ProbeState())
+                if not due(state, probe, proc.started_at, self._clock.monotonic()):
+                    continue
+                ok = await self._prober.check(pod, probe)
+                new = observe(state, probe, ok, self._clock.monotonic())
+                self._probes[key] = new
+                if kind == "readiness" and new.passing != state.passing:
+                    changed = True  # report it now, not at the next resync
+                if kind == "liveness" and liveness_failed(new, probe):
+                    log.warning("pod %s: liveness probe failed %d times: restarting",
+                                pod.metadata.name, new.failures)  # fmt: skip
+                    self._runtime.stop(uid)
+                    await self.events.record(
+                        pod, "Unhealthy", f"liveness probe failed {new.failures} times", "Warning"
+                    )
+        self._probes = {k: v for k, v in self._probes.items() if k in live}
+        if changed:
+            self._wake.notify()
+
     async def _fail(self, pod: Pod, reason: str, message: str) -> None:
         log.warning("pod %s: %s: %s", pod.metadata.name, reason, message)
         pod.status.phase, pod.status.reason, pod.status.message = PodPhase.FAILED, reason, message
@@ -265,6 +340,8 @@ class Agent:
                     self._every(min(interval, self._fencing.shim_poll), self.fence_check)
                 )
                 tasks.create_task(self.pods.run())
+                tasks.create_task(self._every(PROBE_TICK, self.probe_once))
+                tasks.create_task(self._every(MEMORY_TICK, self.memory_once))
                 tasks.create_task(self._sync_forever())
         finally:
             await self._runtime.stop_all()

@@ -58,7 +58,9 @@ def test_creates_the_missing_replicas() -> None:
 def test_does_nothing_at_the_desired_count() -> None:
     pods = [pod(n) for n in "abc"]
     d = dep(3)
-    d.status = DeploymentStatus(observed_generation=1, replicas=3, ready_replicas=3)
+    d.status = DeploymentStatus(
+        observed_generation=1, replicas=3, ready_replicas=3, updated_replicas=3
+    )
     assert reconcile(d, pods) == []
 
 
@@ -96,7 +98,11 @@ def test_status_counts_active_and_ready() -> None:
     pods = [pod("a"), pod("b", PodPhase.BOUND), pod("c", PodPhase.FAILED)]
     statuses = [a for a in reconcile(dep(2), pods) if isinstance(a, UpdateStatus)]
     assert statuses == [
-        UpdateStatus(DeploymentStatus(observed_generation=1, replicas=2, ready_replicas=1))
+        UpdateStatus(
+            DeploymentStatus(
+                observed_generation=1, replicas=2, ready_replicas=1, updated_replicas=2
+            )
+        )
     ]
 
 
@@ -119,3 +125,19 @@ def test_orphans() -> None:
     theirs.metadata.owner = "deleted-uid"
     bare.metadata.owner = None
     assert orphans([mine, theirs, bare], {"dep-uid"}) == [theirs]
+
+
+def test_template_hash_is_stable_across_upgrades() -> None:
+    """Fields added later (probes, P10.1) must not change the hash of templates that don't
+    use them, or upgrading Chronos would roll out every deployment. The value is what
+    the code before probes computed for this template."""
+    from chronos.core.reconcile import template_hash  # noqa: PLC0415
+
+    dep = Deployment.model_validate({
+        "metadata": {"name": "web"},
+        "spec": {"replicas": 2, "template": {
+            "command": ["serve", "--port", "8080"], "env": {"MODE": "prod"},
+            "resources": {"requests": {"cpu": "500m", "memory": "256Mi"}},
+        }},
+    })  # fmt: skip
+    assert template_hash(dep) == "340494c604"

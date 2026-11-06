@@ -1,2 +1,2 @@
-NAME   READY   ACTIVE   AGE
-web    2/3     3        3h
+NAME   READY   UP-TO-DATE   ACTIVE   AGE
+web    2/3     3            3        3h
