@@ -20,7 +20,7 @@ from chronos.core.schedule import SchedulerConfig, resolve
 from chronos.server.app import create_app
 from chronos.store import Store
 from chronos.store.leases import Leases
-from chronos.store.wal import WalCorrupt, recover
+from chronos.store.wal import SyncMode, WalCorrupt, recover
 
 app = typer.Typer(
     help="chronosd: the control plane (API server, store, controllers).",
@@ -29,11 +29,13 @@ app = typer.Typer(
 )
 
 
-def build(timings: Timings, store: Store) -> FastAPI:
+def build(timings: Timings, store: Store, group_window: float = 0.002) -> FastAPI:
     clock = RealClock()
     # Leases start empty at boot, so every node gets a full grace period after a restart
     # (U2.1): none is NotReady earlier than eviction_timeout after the server starts.
-    client = LocalStoreClient(store, Leases(clock), timings.eviction_timeout)
+    client = LocalStoreClient(
+        store, Leases(clock), timings.eviction_timeout, clock=clock, group_window=group_window
+    )
     lifecycle = NodeLifecycleController(client, clock, timings)
     scheduler = SchedulerController(
         client, clock, resolve(SchedulerConfig()), timings.scheduler_tick
@@ -42,7 +44,7 @@ def build(timings: Timings, store: Store) -> FastAPI:
     return create_app(client, loops=[lifecycle.run, scheduler.run, deployments.run])
 
 
-def _open_store(data_dir: Path, sync: bool, snapshot_every: int) -> Store:
+def _open_store(data_dir: Path, sync: SyncMode, snapshot_every: int) -> Store:
     try:
         return Store.open(data_dir, RealClock(), sync=sync, snapshot_every=snapshot_every)
     except WalCorrupt as exc:
@@ -59,8 +61,13 @@ def run(
         Path | None, typer.Option(help="WAL and snapshots. Default: ~/.chronos/server")
     ] = None,
     wal_sync: Annotated[
-        bool, typer.Option(help="fsync every write before acknowledging it. Off: benchmarks only.")
-    ] = True,
+        str,
+        typer.Option(
+            help="full: sync each write before acking it. group: batch syncs every "
+            "--group-window ms (acks and reads wait for them). none: benchmarks only."
+        ),
+    ] = "full",
+    group_window: Annotated[float, typer.Option(help="Group-commit window, ms.")] = 2.0,
     snapshot_every: int = 5_000,
     heartbeat_interval: float = 1.0,
     node_grace: float = 4.0,
@@ -79,9 +86,14 @@ def run(
         raise typer.Exit(code=2) from None
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # not one line per request
-    store = _open_store(data_dir or Path.home() / ".chronos" / "server", wal_sync, snapshot_every)
+    if wal_sync not in ("full", "group", "none"):
+        typer.echo(f"chronosd: --wal-sync must be full, group or none (got {wal_sync!r})", err=True)
+        raise typer.Exit(code=2)
+    mode: SyncMode = "group" if wal_sync == "group" else "none" if wal_sync == "none" else "full"
+    store = _open_store(data_dir or Path.home() / ".chronos" / "server", mode, snapshot_every)
     try:
-        uvicorn.run(build(timings, store), host=host, port=port, log_level="warning")
+        app_ = build(timings, store, group_window / 1000)
+        uvicorn.run(app_, host=host, port=port, log_level="warning")
     finally:
         store.close()
 

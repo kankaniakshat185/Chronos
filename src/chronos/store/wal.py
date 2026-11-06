@@ -28,6 +28,7 @@ import sys
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from chronos.common import crashpoint
 from chronos.store.codec import HEADER, InvalidFrame, Record, decode, encode
@@ -35,6 +36,10 @@ from chronos.store.codec import HEADER, InvalidFrame, Record, decode, encode
 log = logging.getLogger(__name__)
 
 DEFAULT_SEGMENT_SIZE = 64 * 1024 * 1024
+
+# full: sync every write before returning. group: write now, sync in batches via
+# flush() (the caller holds acks until then). none: never sync (benchmarks only).
+type SyncMode = Literal["full", "group", "none"]
 KEEP_SNAPSHOTS = 2
 
 
@@ -203,13 +208,14 @@ class Wal:
         data_dir: Path,
         next_rev: int,
         *,
-        sync: bool = True,
+        sync: SyncMode = "full",
         segment_size: int = DEFAULT_SEGMENT_SIZE,
     ) -> None:
         self.dir = data_dir
-        self._sync = sync
+        self.sync_mode: SyncMode = sync
         self._segment_size = segment_size
-        if not sync:
+        self._dirty = False
+        if sync == "none":
             log.warning("WAL sync is OFF: acknowledged writes can be lost (benchmarks only)")
         existing = segments(data_dir)
         if existing:
@@ -226,7 +232,8 @@ class Wal:
         sync_dir(self.dir)
 
     def append(self, record: Record) -> None:
-        """Durable when this returns. Raises OSError (e.g. disk full) on failure."""
+        """In "full" mode, durable when this returns; in "group" mode, once the next
+        flush() returns. Raises OSError (e.g. disk full) on failure."""
         frame = encode(record)
         if self._size and self._size + len(frame) > self._segment_size:
             crashpoint.hit("segment.rotate")
@@ -237,12 +244,24 @@ class Wal:
             os._exit(crashpoint.CRASH_EXIT)
         os.write(self._fd, frame)
         self._size += len(frame)
-        crashpoint.hit("wal.before_fsync")
-        if self._sync:
+        if self.sync_mode == "full":
+            crashpoint.hit("wal.before_fsync")
             durable_sync(self._fd)
+            crashpoint.hit("wal.after_fsync_before_apply")
+        else:
+            self._dirty = True
+
+    def flush(self) -> None:
+        """Group mode: make everything appended so far durable, with one sync."""
+        if self.sync_mode != "group" or not self._dirty:
+            return
+        crashpoint.hit("wal.before_fsync")
+        durable_sync(self._fd)
+        self._dirty = False
         crashpoint.hit("wal.after_fsync_before_apply")
 
     def roll(self, next_rev: int) -> None:
+        self.flush()  # the old segment's pending records must not be left unsynced
         os.close(self._fd)
         self._open_segment(next_rev)
 
@@ -261,4 +280,5 @@ class Wal:
         sync_dir(self.dir)
 
     def close(self) -> None:
+        self.flush()
         os.close(self._fd)

@@ -68,7 +68,7 @@ All MVP code lives in the final module layout (PLAN.md §4.6). The MVP-only part
 | 0014 | Proposed (partial) | memory-limit enforcement (X-1/X-2 done) |
 | 0017 | Proposed (partial) | `workload_type` validation needs X-4 (PM-1); kind dispatch via X-6 (PM-3) |
 | 0023 | Proposed (partial) | X-1–X-5, X-8 and early X-9 done (X-4/X-5/X-8 in PM-1); X-6, X-7 and final X-9 later |
-| 0015 | **Accepted** at the end of PM-2 (2026-11-06) | group commit deferred to PM-6 (B5) |
+| 0015 | **Accepted** at the end of PM-2 (2026-11-06) | — (group commit included) |
 | 0008, 0016 | Proposed | not started |
 | 0018 | Deferred (Backlog) | not scheduled |
 | 0019, 0020, 0021 | Deferred – Stage 2 | not scheduled |

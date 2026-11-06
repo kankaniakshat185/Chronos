@@ -90,7 +90,9 @@ flowchart LR
   silently overwriting ([ADR-0007](docs/adr/0007-versioned-single-writer-store.md)).
 - **Durable before acknowledged.** Each write is one CRC-framed record in a write-ahead log,
   synced to disk (`F_FULLFSYNC` on macOS) before memory changes and before the client hears
-  back; snapshots bound recovery time. On restart a write torn by the crash is cut off, and
+  back (or, with `--wal-sync group`, several writes share one sync and nothing is answered
+  until it's done: about 10× the write throughput under concurrent load); snapshots bound
+  recovery time. On restart a write torn by the crash is cut off, and
   any other damage stops the server from starting rather than silently losing data
   ([ADR-0015](docs/adr/0015-wal-and-snapshots.md)).
 - **Functional core, imperative shell.** Scheduling, reconciliation, node health and agent

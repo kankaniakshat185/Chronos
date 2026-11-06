@@ -44,7 +44,7 @@ from chronos.store.validation import (
     validate_spec_update,
     validate_status_update,
 )
-from chronos.store.wal import DEFAULT_SEGMENT_SIZE, Snapshot, Wal, recover
+from chronos.store.wal import DEFAULT_SEGMENT_SIZE, Snapshot, SyncMode, Wal, recover
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ class Store:
         self._wal = wal
         self._snapshot_every = snapshot_every
         self._since_snapshot = 0
+        self._durable = 0  # highest revision known to be on disk (or all, without a WAL)
 
     @classmethod
     def open(
@@ -84,7 +85,7 @@ class Store:
         data_dir: Path,
         clock: Clock,
         *,
-        sync: bool = True,
+        sync: SyncMode = "full",
         segment_size: int = DEFAULT_SEGMENT_SIZE,
         snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
         uid_factory: Callable[[], str] = _new_uid,
@@ -103,6 +104,7 @@ class Store:
         for record in found.records:
             store._apply(record)
         store._wal = Wal(data_dir, store._revision + 1, sync=sync, segment_size=segment_size)
+        store._durable = store._revision
         log.info(
             "recovered revision %d (snapshot %s + %d records%s)",
             store._revision,
@@ -117,6 +119,25 @@ class Store:
     def close(self) -> None:
         if self._wal is not None:
             self._wal.close()
+            self._durable = self._revision
+
+    @property
+    def durable_revision(self) -> int:
+        """Every change up to this revision is on disk. With group commit it can lag
+        `revision`; nothing past it may be shown to anyone (see `flush`)."""
+        if self._wal is None or self._wal.sync_mode != "group":
+            return self._revision
+        return self._durable
+
+    def flush(self) -> int:
+        """Group commit: sync everything written so far; returns the durable revision."""
+        if self._wal is not None:
+            try:
+                self._wal.flush()
+            except OSError as exc:
+                raise Unavailable(f"WAL sync failed: {exc}") from exc
+        self._durable = self._revision
+        return self._durable
 
     @property
     def revision(self) -> int:

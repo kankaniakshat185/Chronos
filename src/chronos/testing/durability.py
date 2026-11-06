@@ -15,6 +15,7 @@ from pathlib import Path
 from chronos.api import Node, NodeCondition, NodeSpec, ObjectMeta, Pod, PodSpec
 from chronos.common.clock import FakeClock
 from chronos.store import Store, StoreError
+from chronos.store.wal import SyncMode
 
 OPS = 60
 SNAPSHOT_EVERY = 7
@@ -26,7 +27,10 @@ def uids() -> object:
     return lambda: f"uid-{next(counter)}"
 
 
-def open_store(data_dir: Path | None) -> Store:
+GROUP_BATCH = 4  # group mode: sync (and only then ack) every 4 operations
+
+
+def open_store(data_dir: Path | None, mode: SyncMode = "full") -> Store:
     clock = FakeClock()
     factory = uids()
     assert callable(factory)
@@ -35,6 +39,7 @@ def open_store(data_dir: Path | None) -> Store:
     return Store.open(
         data_dir,
         clock,
+        sync=mode,
         snapshot_every=SNAPSHOT_EVERY,
         segment_size=SEGMENT_SIZE,
         uid_factory=factory,
@@ -83,17 +88,25 @@ def states(seed: int) -> list[tuple[int, list[tuple[str, dict[str, object]]]]]:
     return out
 
 
-def run(data_dir: Path, seed: int, report: bool = False) -> None:
-    store, rng = open_store(data_dir), random.Random(seed)
+def run(data_dir: Path, seed: int, report: bool = False, mode: SyncMode = "full") -> None:
+    """In "group" mode, results are reported only after a flush, like the server's acks."""
+    store, rng = open_store(data_dir, mode), random.Random(seed)
+    pending: list[str] = []
     for i in range(OPS):
         ok = step(store, rng, i)
-        if report:
-            print(f"{'ack' if ok else 'rej'} {i}", flush=True)
+        pending.append(f"{'ack' if ok else 'rej'} {i}")
+        if mode != "group" or len(pending) == GROUP_BATCH or i == OPS - 1:
+            if mode == "group":
+                store.flush()
+            if report:
+                print("\n".join(pending), flush=True)
+            pending = []
     store.close()
 
 
 def main(argv: list[str]) -> int:
-    run(Path(argv[0]), int(argv[1]), report=True)
+    mode: SyncMode = "group" if argv[2:] == ["group"] else "full"
+    run(Path(argv[0]), int(argv[1]), report=True, mode=mode)
     return 0
 
 
