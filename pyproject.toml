@@ -48,6 +48,7 @@ ignore = ["PLR2004", "PLR0913"]
 "src/chronos/common/clock.py" = ["TID251"]
 "src/chronos/testing/workload.py" = ["TID251"]  # a plain sync test process
 "src/chronos/shim/__main__.py" = ["TID251"]  # separate sync process; same clock as the agent
+"bench/*.py" = ["TID251", "E501", "ASYNC110"]  # wall time and polling on purpose; tables
 
 [tool.mypy]
 strict = true
@@ -83,6 +84,7 @@ markers = [
 [dependency-groups]
 dev = [
     "hypothesis>=6.170.14",
+    "matplotlib>=3.11.2",
     "mypy>=2.4.1",
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",

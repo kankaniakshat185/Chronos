@@ -61,3 +61,33 @@ jobs:
       - run: CHRONOS_BIND=0.0.0.0 uv run pytest -m observability -v tests/integration/test_observability.py
       - if: failure()
         run: docker compose -f deploy/observability/docker-compose.yml logs
+
+  # Chaos on real processes (P8.4): 60 s, 3 nodes, every PR; the report is uploaded.
+  chaos-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run python -m chronos.testing.chaos --seed ${{ github.run_number }} --duration 60 --nodes 3 --out chaos-report
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-report
+          path: chaos-report
+
+  # Scheduler throughput regression (TESTING.md 9): fails on a > 30 % drop from the
+  # committed baseline. The baseline was measured on a laptop, not a CI runner, so this
+  # stays advisory until a CI-measured baseline is committed.
+  bench-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: cd bench && uv run python b4_scheduler.py --smoke

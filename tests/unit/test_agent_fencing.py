@@ -208,3 +208,12 @@ async def test_after_registering_nothing_starts_before_the_cache_reaches_it(
     await agent.sync_once()
     assert runtime.started == []  # it listed first, and "p" is Failed now
     assert agent.pods.revision == 5
+
+
+def test_a_slow_heartbeat_reply_is_waited_for_up_to_half_of_f() -> None:
+    """Chaos finding: a 160 ms timeout turned server latency into fencing storms."""
+    from chronos.agent.agent import heartbeat_timeout  # noqa: PLC0415
+
+    assert heartbeat_timeout(0.2, 1.0) == 0.5  # the test timings: not 0.16
+    assert heartbeat_timeout(1.0, 6.0) == 3.0  # production defaults
+    assert heartbeat_timeout(1.0, 1.0) == 0.8  # never below 0.8 x the interval

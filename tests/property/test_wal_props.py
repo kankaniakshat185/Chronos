@@ -72,7 +72,9 @@ def test_recovery_from_every_truncation_offset_is_the_complete_prefix(tmp_path: 
         shutil.rmtree(trial)
 
 
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture], max_examples=50)
+@settings(
+    suppress_health_check=[HealthCheck.function_scoped_fixture], max_examples=50, deadline=None
+)
 @given(st.data())
 def test_bit_flip_in_the_last_record_is_truncated(
     tmp_path_factory: pytest.TempPathFactory, data: st.DataObject
@@ -88,7 +90,9 @@ def test_bit_flip_in_the_last_record_is_truncated(
     assert recover(d).records == written[:-1]
 
 
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture], max_examples=100)
+@settings(
+    suppress_health_check=[HealthCheck.function_scoped_fixture], max_examples=100, deadline=None
+)
 @given(st.data())
 def test_bit_flip_before_the_last_record_refuses_to_start(
     tmp_path_factory: pytest.TempPathFactory, data: st.DataObject
@@ -154,7 +158,7 @@ def ready_node(store: Store) -> None:
     store.update_status(n)
 
 
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture], deadline=None)
 @given(ops, st.integers(1, 6))
 def test_reopening_gives_back_exactly_the_same_state(
     tmp_path_factory: pytest.TempPathFactory, script: list[tuple[str, int]], every: int

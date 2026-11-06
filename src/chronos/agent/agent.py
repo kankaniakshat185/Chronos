@@ -45,6 +45,17 @@ from chronos.store.errors import EpochMismatch, Unavailable
 log = logging.getLogger(__name__)
 
 
+def heartbeat_timeout(interval: float, fence_timeout: float) -> float:
+    """How long to wait for one heartbeat's reply: up to F/2, not just 0.8 x the interval.
+
+    The lease counts from the *send* time (ADR-0012), so a late reply is still good
+    evidence, and giving up early turns server latency into needless fencing. Found by
+    chaos: with 160 ms, an overloaded chronosd made agents fence, restart everything,
+    and overload it again.
+    """
+    return max(interval * 0.8, fence_timeout / 2)
+
+
 class AgentRejected(Exception):
     """The server refused this agent (e.g. its fencing timings are unsafe there)."""
 

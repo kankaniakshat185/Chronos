@@ -1,0 +1,129 @@
+{
+  "name": "b3",
+  "date": "2026-11-06",
+  "machine": {
+    "cpu": "Apple M2",
+    "cores": 8,
+    "memory_gib": 16.0,
+    "os": "Darwin 25.5.0",
+    "python": "3.12.11"
+  },
+  "config": {
+    "pauses": [
+      0.454,
+      0.637,
+      1.203,
+      0.65,
+      2.415,
+      1.252,
+      4.066,
+      1.131,
+      1.286,
+      2.379,
+      0.755,
+      2.589,
+      0.485,
+      0.307,
+      0.528,
+      3.105,
+      1.282,
+      1.016,
+      0.611,
+      3.343
+    ],
+    "kills": 3,
+    "evictions": [
+      1.5,
+      3.0,
+      6.0
+    ],
+    "timings": {
+      "1.5": {
+        "heartbeat_interval": 0.15,
+        "node_grace": 0.6000000000000001,
+        "eviction_timeout": 1.5,
+        "resync_interval": 1.0,
+        "fence_timeout": 0.75,
+        "termination_grace": 0.30000000000000004,
+        "drift_margin": 0.15000000000000002,
+        "crash_backoff_base": 0.2,
+        "crash_backoff_cap": 1.6
+      },
+      "3.0": {
+        "heartbeat_interval": 0.3,
+        "node_grace": 1.2000000000000002,
+        "eviction_timeout": 3.0,
+        "resync_interval": 1.0,
+        "fence_timeout": 1.5,
+        "termination_grace": 0.6000000000000001,
+        "drift_margin": 0.30000000000000004,
+        "crash_backoff_base": 0.2,
+        "crash_backoff_cap": 1.6
+      },
+      "6.0": {
+        "heartbeat_interval": 0.6,
+        "node_grace": 2.4000000000000004,
+        "eviction_timeout": 6.0,
+        "resync_interval": 1.0,
+        "fence_timeout": 3.0,
+        "termination_grace": 1.2000000000000002,
+        "drift_margin": 0.6000000000000001,
+        "crash_backoff_base": 0.2,
+        "crash_backoff_cap": 1.6
+      }
+    }
+  },
+  "results": {
+    "1.5": {
+      "detection": {
+        "samples": [
+          1.6087347499560565,
+          1.5061744589474984,
+          1.7135966249625199
+        ],
+        "n": 3,
+        "p50": 1.6087347499560565,
+        "p95": 1.7135966249625199,
+        "p99": 1.7135966249625199,
+        "mean": 1.609501944622025
+      },
+      "false_evictions": 6,
+      "pauses": 20,
+      "false_eviction_rate": 0.3
+    },
+    "3.0": {
+      "detection": {
+        "samples": [
+          3.251545792038087,
+          3.011051875015255,
+          3.163747709011659
+        ],
+        "n": 3,
+        "p50": 3.163747709011659,
+        "p95": 3.251545792038087,
+        "p99": 3.251545792038087,
+        "mean": 3.142115125355
+      },
+      "false_evictions": 2,
+      "pauses": 20,
+      "false_eviction_rate": 0.1
+    },
+    "6.0": {
+      "detection": {
+        "samples": [
+          6.021132458990905,
+          6.198784333944786,
+          6.1911204580101185
+        ],
+        "n": 3,
+        "p50": 6.1911204580101185,
+        "p95": 6.198784333944786,
+        "p99": 6.198784333944786,
+        "mean": 6.1370124169819364
+      },
+      "false_evictions": 0,
+      "pauses": 20,
+      "false_eviction_rate": 0.0
+    }
+  }
+}

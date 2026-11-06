@@ -116,7 +116,7 @@ class Cluster:
                 start_new_session=True,
             )
 
-    async def start(self) -> None:
+    async def start(self, within: float = 15.0) -> None:
         t = self.timings
         self._server = self._spawn(
             "chronosd",
@@ -136,7 +136,7 @@ class Cluster:
             except httpx.TransportError:
                 return False
 
-        await eventually(healthy, within=15.0)
+        await eventually(healthy, within=within)
 
     def kill_server(self) -> None:
         """SIGKILL chronosd, like a crash: no shutdown, no flushing."""

@@ -108,7 +108,8 @@ class SchedulerController(Controller):
 
     def keys(self) -> list[str]:
         return [
-            p.metadata.name for p in sorted(filter(is_pending, self._pods.list()), key=_age_key)
+            p.metadata.name
+            for p in sorted(filter(is_pending, self._pods.view().values()), key=_age_key)
         ]
 
     def node_infos(self) -> list[NodeInfo]:
@@ -128,7 +129,7 @@ class SchedulerController(Controller):
                     extra.get(node.metadata.name, {}),
                 ),
             )
-            for node in self._nodes.list()
+            for _, node in sorted(self._nodes.view().items())  # read only: no copies
         ]
 
     async def reconcile(self, key: str) -> None:

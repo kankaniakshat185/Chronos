@@ -32,7 +32,7 @@ import logging
 import random
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Callable, Coroutine, Iterable
+from collections.abc import Callable, Coroutine, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, cast
 
@@ -143,6 +143,12 @@ class Informer[T: ApiObject]:
 
     def list(self) -> builtins.list[T]:
         return [self._items[n].model_copy(deep=True) for n in sorted(self._items)]
+
+    def view(self) -> Mapping[str, T]:
+        """The cached objects themselves, not copies, for hot read-only paths (the
+        scheduler reads every node per decision; copying them was 85% of its time, B4).
+        Never mutate what this returns."""
+        return self._items
 
     def by_index(self, index: str, key: str) -> builtins.list[T]:
         names = self._indexes[index][1].get(key, set())

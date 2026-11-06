@@ -2,7 +2,7 @@
 
 Chronos makes strong claims: "never more than R replicas", "an acknowledged write survives a crash", "a pod never lands on a node without enough slots". Each claim is backed by tests. But a passing test only proves something if it *would fail* when the claim breaks. This log records how that was checked: by deliberately breaking the code that upholds each claim and confirming that a test notices.
 
-It covers the MVP through PM-5 (50 hand-made mutations plus the simulator's 10 canaries so far), and gets a new entry every time a guarantee is added.
+It covers the MVP through PM-6 (55 hand-made mutations plus the simulator's 10 canaries so far), and gets a new entry every time a guarantee is added.
 
 ---
 
@@ -131,6 +131,16 @@ For this block the mutations were run by a small script (kept outside the repo) 
 | 49 | Exported in base units | CPU in millicores | metrics test (`... cpu"} 2.0`) | ✅ caught |
 | 50 | Recurring events survive GC | GC by `first_seen` instead of `last_seen` | event GC test | ❌ **survived**: every test event was recorded once, so first and last seen were equal; caught after an "old but still recurring" event was added |
 
+### PM-6: the chaos checker
+
+| # | Guarantee | Injected bug | Expected to catch | Result |
+|---|---|---|---|---|
+| 51 | Frozen processes aren't "running" until one poll after the thaw | the checker counts SIGSTOPped workloads | checker unit tests | ❌ **survived** at first (no test had a frozen node); caught after one was added |
+| 52 | A one-sample read race isn't a violation | S3/S4/S12 flag on the first sample | checker unit tests | ✅ caught |
+| 53 | The S4 bound is F + K + poll + sampling, not looser | 1.7 s of extra slack | checker unit tests | ❌ **survived** at first (the only S4 test was 10 s past the bound); caught after a boundary test |
+| 54 | A terminating pod's process isn't a duplicate | the checker counts terminating pods | checker unit tests | ✅ caught |
+| 55 | The checker sees violations on real processes, not just synthetic ones | a rogue workload started behind Chronos's back | `test_the_checker_catches_a_rogue_workload` | ✅ caught live as S3, and as an L5 orphan after the heal |
+
 ### PM-4: canaries (the simulator's own "test the tests", TESTING.md 6.5)
 
 Each canary switches off one protection inside the simulator, and the simulator must report a violation of the expected invariant. Measured over the first 40 seeds:
@@ -150,7 +160,7 @@ Each canary switches off one protection inside the simulator, and the simulator 
 
 `tests/sim/test_canaries.py` scans seeds from 0 for each canary and fails if its whole budget (200-1 000 seeds) passes clean. Two canaries started at 0/40; neither could be fixed by changing the canary (see 4.10 and 4.11).
 
-**Score:** of 49 code mutations, 40 were caught on the first try and 9 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4, 1 in PM-5). Every survivor led to a new or redesigned test, and all 49 are caught now. One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
+**Score:** of 53 code mutations, 42 were caught on the first try and 11 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4, 1 in PM-5, 2 in PM-6). Every survivor led to a new or redesigned test, and all 53 are caught now. (#55 plants a fault instead of changing code.) One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
 
 ---
 
@@ -227,7 +237,7 @@ Two shim tests timed the fence timeout from *after* the shim process started (ab
 The first freeze test waited until "the store and the live processes agree" while the old workload was *frozen*, and frozen processes count as alive, so they could never agree. It failed before resuming the frozen processes, teardown then hung on them, and processes were left behind. **Fix:** check the store only during the freeze; teardown now SIGCONTs everything first and SIGKILLs agents that don't stop.
 
 ### 4.7 Running is not "ready" (PM-3)
-Two MVP tests delete a SIGTERM-ignoring workload and check that it survives SIGTERM until the grace period ends. After the move to watches, the workload died from SIGTERM 50 ms after starting. The agent now reports Running the moment the process starts (polling used to add ≥ 100 ms), and the tests deleted the pod before the Python workload had installed its `SIG_IGN` handler. **Fix:** the tests wait for the workload's first output line, which it prints after installing the handler. The product was right; the tests relied on a delay that polling happened to provide. **Lesson:** making a system faster exposes tests that depended on it being slow.
+Two MVP tests delete a SIGTERM-ignoring workload and check that it survives SIGTERM until the grace period ends. After the move to watches, the workload died from SIGTERM 50 ms after starting. The agent now reports Running the moment the process starts (polling used to add ≥ 100 ms), and the tests deleted the pod before the Python workload had installed its `SIG_IGN` handler. **Fix:** the tests wait for the workload's first output line, which it prints after installing the handler. The product was right; the tests relied on a delay that polling happened to provide. **Lesson:** making a system faster exposes tests that depended on it being slow. (The same assumption turned up again in PM-6, in a shim test: under load, the lease's 0.3 s fence timeout ran out before the Python workload had installed its handler. The test now keeps the lease fresh until the workload reports ready, then lets it age.)
 
 ### 4.8 Two "stale cache" tests whose caches weren't stale (PM-3)
 Two tests, caught while writing them: (a) the orphan-GC test was meant to show that a controller whose *deployment* cache is behind doesn't delete the deployment's pods, but its deployment cache had in fact been refreshed, so it showed nothing; it now uses a second controller whose deployment cache is empty. (b) The node-event test failed with a Conflict because its *pod* cache was stale as well (it hadn't seen the `Unschedulable` status write), which a live system's watch would have delivered. **Lesson:** in a test about stale caches, write down which cache is stale and which is fresh, and set each one up deliberately.
@@ -240,6 +250,15 @@ The first fix for the simulator's seed 25 made the agent relist after registerin
 
 ### 4.11 History too long to fall out of (PM-4)
 `watch_skip_on_compaction` was also 0/40: with 64 events of history, an agent that was cut off rarely fell far enough behind to need a 410. The simulator now keeps 16 (production keeps 10 000; what matters is how far behind an agent gets relative to the history), and detects it in 2/40.
+
+### 4.13 A unit-exclusivity "violation" that was the checker reading stale status (PM-6)
+The first 10-minute chaos runs reported S12, two live pods holding the same unit of an extended resource, on and off for about 10 seconds at a time. The hits were intermittent, but a real double allocation would show on every 200 ms sample. The checker read units from `pod.status.assigned`, which the agent reports after the fact: a pod that was fenced keeps its old `assigned` in the store until its next report. **Fix:** check the real thing. The runtime now puts each process's units in its environment (`CHRONOS_ASSIGNED`), and the checker compares those across the live processes on a node. **Lesson:** an invariant checker should read the ground truth, not a report about it, wherever the ground truth is reachable.
+
+### 4.14 A real-time bound on an overloaded machine (PM-6)
+Running three 5-node chaos runs in parallel on the laptop (about 150 Python processes polling every 50-100 ms, plus macOS's Spotlight updater) pushed the load average to 80-190 on 8 cores. S4 then fired: workloads ran up to 0.85 s past the F + K bound, because the shims and agents weren't scheduled on time. The bound wasn't loosened; the setup was wrong. CI runs each nightly seed on its own runner, local runs now go one at a time, and every report records the maximum load average, so a starved machine is visible as such. **Lesson:** a real-time check is only meaningful on a machine that can keep time; record the conditions alongside the result.
+
+### 4.15 A timing guarantee whose margin wasn't met (PM-6)
+After the parallel runs were stopped, a single 10-minute run still reported S3 and S4: a workload ran 3.6 s after its node's last accepted heartbeat (bound 2.1 s), and one deployment briefly had 6 processes for 5 replicas. The trace showed the machine stalling: load average 74, three nodes going Unknown in the same instant, a restarted agent taking 2 s just to start Python. The shims fenced, but a second late. Fencing is a timing guarantee, F + K + drift < E, and the **drift margin** is the slack for exactly this; the chaos runner had been using the test fixture's 0.2 s. **Fix:** chaos runs on the demo's timings (drift margin 1 s; production also uses 1 s, with E = 10 s), and the S4 bound includes the drift margin. **Lesson:** when a real-time guarantee fails, check its preconditions before its implementation, and say which one failed.
 
 ### 4.12 The simulator hung (PM-4)
 One seed under `fence_after_eviction` pegged a CPU forever. A simulated process start took zero time, so "kill past E" and "start again" alternated at one virtual instant without end. Starts now take 1-20 ms (fork + exec), and the engine raises a `SimError` for a livelock (100 000 events at one instant) or a runaway (2 million events) instead of hanging. **Lesson:** a test harness needs its own guard against running forever.
@@ -261,6 +280,7 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 | PM-1 | proxy deadlock: on Python 3.12 `Server.wait_closed()` waits for open connections | partition test hanging |
 | PM-2 | `chronosd wal-verify` would have truncated a torn tail while "verifying" | review while writing the CLI |
 | PM-3 | **lost wakeup**: the in-process watch registered its waiter inside a task, so a write landing before the task first ran went unnoticed until the 30 s timeout | the X-6 widget test (it creates an object right at startup), then pinned by a deterministic race test (#29) |
+| PM-6 | **a metastable failure: fencing storms from a too-impatient heartbeat** (agents gave up on a heartbeat after 160 ms; an overloaded `chronosd`, whose WAL fsyncs block its event loop, missed that; the agents fenced, restarted every workload at once, and overloaded it again; one run never converged after the heal) | chaos, seed 102 (L2). Fixed: the agent waits up to F/2 for a reply, which is safe because the lease counts from the send time |
 | PM-4 | **after a whole-node freeze, the agent renewed its lease before the shim's next poll**, so the shim let a replaced workload run up to K alongside its replacement (S3; the "one shim poll" claim was false) | the simulator, seed 9 (and 24) |
 | PM-4 | **a resumed agent restarted evicted pods from its stale pod cache** after re-registering (S3; came in with PM-3's caching) | the simulator, seed 25 |
 | PM-4 | **concurrent relist and watch:** an older list wiped a pod the watch had delivered (S6; came in with the first fix for seed 25) | the simulator's S6 check, seed 21 |
@@ -292,6 +312,9 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 - *Making the system faster broke two tests* (4.7): they relied on polling's delay.
 - *The simulator found three real bugs in its first hour* (section 5), two of them introduced by my own recent changes (PM-3's caching, and a fix).
 - *An undetectable canary taught me a design rule* (4.10): the heartbeat timeout must stay below E − F − K, or the "send time" rule stops mattering.
+- *Check the ground truth, not a report of it* (4.13): the chaos checker's S12 false alarm came from reading status instead of the processes.
+- *Chaos found a metastable failure the simulator couldn't* (section 5): an impatient heartbeat timeout, an fsync that blocks the event loop, and a restart storm feeding each other. The simulator doesn't model CPU contention; real processes do.
+- *When a timing guarantee fails, check its preconditions first* (4.15): the drift margin wasn't met on an overloaded laptop.
 - *Defence in depth hides bugs from tests* (3.2): the agent and the shim both fence, so a test must switch one off to prove the other works.
 - *`kill -9` is not power loss* (3.5): crash tests can't see a missing fsync; sync accounting can.
 - *Crash tests don't cover error paths* (3.4): disk full is not a crash.

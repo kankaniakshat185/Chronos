@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chronos.agent.agent import heartbeat_timeout
 from chronos.api import Deployment, DeploymentSpec, ObjectMeta, PodTemplate
 from chronos.api.resources import format_resources
 from chronos.common.config import FencingConfig, Timings
@@ -97,7 +98,8 @@ class World:
         self.settings = AgentSettings(
             fencing=f, backoff=BACKOFF, resync_interval=1.0, watch_wait=10.0,
             request_timeout=2.0,
-            heartbeat_timeout=hooks.heartbeat_timeout or TIMINGS.heartbeat_timeout,
+            heartbeat_timeout=hooks.heartbeat_timeout
+            or heartbeat_timeout(f.heartbeat_interval, f.fence_timeout),  # as the real agent
             patches=list(hooks.agent or []),
         )  # fmt: skip
         self.nodes = {

@@ -65,9 +65,12 @@ async def test_stale_lease_fences_gracefully(tmp_path: Path) -> None:
 
 
 async def test_sigterm_ignoring_workload_is_killed_after_the_grace(tmp_path: Path) -> None:
-    written = clock.monotonic()  # the fence timeout counts from the lease, not the start
-    lease = lease_at(tmp_path / "lease", 0)
+    # Fresh while the workload starts: under load, Python can take longer than the fence
+    # timeout to install its SIG_IGN handler, and an early SIGTERM would just kill it.
+    lease = lease_at(tmp_path / "lease", -30)
     proc, pid = await shim(lease, *WORKLOAD, "--ignore-sigterm", fence=0.3, grace=0.6)
+    lease_at(lease, 0)  # the workload is ready (its first line is out): now let it age
+    written = clock.monotonic()  # the fence timeout counts from the lease, not the start
     assert await wait(proc, 5) == -signal.SIGKILL  # the group SIGKILL takes the shim too
     assert clock.monotonic() - written >= 0.3 + 0.6
     assert not alive(pid)

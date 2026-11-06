@@ -11,7 +11,7 @@ from prometheus_client import CollectorRegistry, start_http_server
 from pydantic import ValidationError
 
 from chronos import __version__
-from chronos.agent.agent import Agent, AgentRejected
+from chronos.agent.agent import Agent, AgentRejected, heartbeat_timeout
 from chronos.agent.providers import Providers
 from chronos.agent.runtime import ProcessRuntime
 from chronos.api.quantity import CPU, MEMORY, QuantityError
@@ -99,7 +99,9 @@ def run(
         raise typer.Exit(code=2)
     logs.setup(log_format, text_prefix=f"{name} ")
     logs.bind(node=name)
-    client = HttpStoreClient(server, heartbeat_timeout=heartbeat_interval * 0.8)
+    client = HttpStoreClient(
+        server, heartbeat_timeout=heartbeat_timeout(heartbeat_interval, fence_timeout)
+    )
     agent = Agent(
         name=name,
         capacity=capacity,

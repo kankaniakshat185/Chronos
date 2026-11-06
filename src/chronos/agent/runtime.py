@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import signal
@@ -115,6 +116,9 @@ class ProcessRuntime:
             "CHRONOS_POD_UID": uid,
             "CHRONOS_POD_NAME": name,
             "CHRONOS_NODE_NAME": self._node,
+            # The units this process holds, e.g. {"chronos.dev/slot": ["1"]} (X-5): for the
+            # workload, and the ground truth the chaos checker verifies S12 against.
+            "CHRONOS_ASSIGNED": json.dumps(assigned, sort_keys=True),
         }
         if self.eviction_timeout is None:
             raise RuntimeError("start() before registration: eviction timeout unknown")

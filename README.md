@@ -200,21 +200,31 @@ the first six seeds. On its first runs it found three real bugs, now fixed and r
 every PR ([`tests/sim/regressions.txt`](tests/sim/regressions.txt)). CI: 200 seeds per PR,
 10 000 nightly.
 
+**Chaos on real processes** (`python -m chronos.testing.chaos --seed N --duration 600`): a real
+`chronosd` and agents, each agent's link through a [fault proxy](src/chronos/testing/faultproxy.py)
+(delay, drop, blackhole, reset), under a seeded schedule of kill -9 (agent, whole node,
+`chronosd`), SIGSTOP of an agent or of a whole node, link faults and crash storms. A live
+checker reads the store and the OS process table every 200 ms (S1-S4, S11, S12), then checks
+liveness after the heal, and writes a report and a timeline. A planted rogue process proves
+it can see a violation. CI: 60 s per PR, 3 x 10 min nightly.
+
+**Benchmarks** (B1-B6: convergence, failure recovery, detection vs false positives, scheduler
+throughput, WAL cost, recovery time) with methodology, raw samples and interpretation:
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
 ## Limitations: what Chronos does not do yet
 
 > **What this does NOT do yet.** Each item names the planned fix. PM-1 closed the items
 > about fencing, crash backoff and one-phase deletion; PM-2 closed durability; PM-3 closed
-> polling; PM-5 closed metrics and dashboards.
+> polling; PM-5 closed metrics and dashboards; PM-6 closed chaos testing and benchmarks.
 
-1. **No chaos testing on real processes.** Randomized faults (partitions, delays, loss, crashes, freezes) run in the deterministic simulator, but against real processes and sockets only scripted integration tests exist. → PM-6 (chaos harness).
-2. **No GPU/CUDA support: planned, Stage 2 (deferred).** Nothing detects or uses GPUs, and no CUDA runs. Stage 1 provides the seams GPU support plugs into: extended resources (X-1/X-2), workload types (X-4) and resource providers (X-5), proven in-process by PX.9 ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)).
-3. **No resource isolation or enforcement.** CPU, memory and extended-resource requests are used for *placement accounting only*; a process can use more than it requested. → memory-limit enforcement PM-9a (P10.3); CPU stays advisory (ADR-0014).
-4. **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → Backlog (P11.x, ADR-0018); not scheduled.
-5. **No benchmarks.** Timings visible in the demo are a single run on a laptop, not measured distributions. → B1–B6, PM-6.
-6. **No jobs / run-to-completion workloads: planned, Stage 2 (deferred)** (ADR-0020). Only long-running Deployments. The kind and controller registries (X-6, built in PM-3) make Jobs purely additive.
-7. **Scheduling policies are generic.** `LeastAllocated` (spread, default) or `MostAllocated` (pack), chosen with `chronosd --scheduler-policy`. Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
-8. **No auth, TLS or multi-tenancy.** It's built for a trusted localhost. (Non-goal.)
-9. **Extensions are in-process only.** There's no plugin loader; new kinds, controllers, resources, workload types and providers are registered by in-tree code. (Conscious limit, ADR-0023; a loader may be added at the start of Stage 2 if needed.)
+1. **No GPU/CUDA support: planned, Stage 2 (deferred).** Nothing detects or uses GPUs, and no CUDA runs. Stage 1 provides the seams GPU support plugs into: extended resources (X-1/X-2), workload types (X-4) and resource providers (X-5), proven in-process by PX.9 ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)).
+2. **No resource isolation or enforcement.** CPU, memory and extended-resource requests are used for *placement accounting only*; a process can use more than it requested. → memory-limit enforcement PM-9a (P10.3); CPU stays advisory (ADR-0014).
+3. **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → Backlog (P11.x, ADR-0018); not scheduled.
+4. **No jobs / run-to-completion workloads: planned, Stage 2 (deferred)** (ADR-0020). Only long-running Deployments. The kind and controller registries (X-6, built in PM-3) make Jobs purely additive.
+5. **Scheduling policies are generic.** `LeastAllocated` (spread, default) or `MostAllocated` (pack), chosen with `chronosd --scheduler-policy`. Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
+6. **No auth, TLS or multi-tenancy.** It's built for a trusted localhost. (Non-goal.)
+7. **Extensions are in-process only.** There's no plugin loader; new kinds, controllers, resources, workload types and providers are registered by in-tree code. (Conscious limit, ADR-0023; a loader may be added at the start of Stage 2 if needed.)
 
 ## Design limitations (deliberate)
 
@@ -235,7 +245,7 @@ The block names used above, in build order:
 | **PM-3** ✅ | Watch + informers + work queue + expectations + assume cache, replacing polling; kind and controller registries |
 | **PM-4** ✅ | Deterministic simulation with canary bugs |
 | **PM-5** ✅ | Full CLI, structured logs, events, `/metrics`, Prometheus + Grafana |
-| **PM-6** | Chaos harness (partitions, pauses, delays) and benchmarks |
+| **PM-6** ✅ | Chaos harness (partitions, pauses, delays) and benchmarks |
 | **PM-9** | Probes, rolling updates, memory limits, drain; final write-up |
 | Stage 2 | GPU-aware scheduling and CUDA workloads, on the seams above (deferred) |
 

@@ -45,7 +45,7 @@ async def scrape(c: httpx.AsyncClient) -> str:
     huge = Pod(metadata=ObjectMeta(name="huge"), spec=PodSpec(command=["x"]))
     huge.spec.resources.requests = {"cpu": 64000}
     assert (await c.post("/api/v1/pods", content=huge.model_dump_json())).is_success
-    for _ in range(50):
+    for _ in range(200):  # up to 10 s: the controllers run on real time here
         text = (await c.get("/metrics")).text
         if "chronos_unschedulable_pods{" in text and "chronos_scheduling" in text:
             return text

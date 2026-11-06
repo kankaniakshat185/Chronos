@@ -1,4 +1,4 @@
-.PHONY: lint type test test-nightly test-durability test-sim check demo-cluster observability observability-down
+.PHONY: lint type test test-nightly test-durability test-sim test-chaos bench plots check demo-cluster observability observability-down
 
 lint:
 	uv run ruff check .
@@ -21,6 +21,18 @@ test-durability:
 # Deterministic simulation: 200 seeds, the regressions and every canary (what CI runs).
 test-sim:
 	SIM_SEEDS=200 uv run pytest -n auto -q tests/sim
+
+# Chaos on real processes: 60 s, 3 nodes (CHAOS_SEED, CHAOS_DURATION to change).
+test-chaos:
+	uv run pytest -m chaos -q tests/chaos
+
+# All six benchmarks (several minutes each), then the plots in docs/img.
+bench:
+	cd bench && for b in b1_convergence b2_recovery b3_detection b4_scheduler b5_wal_sync b6_recovery; do uv run python $$b.py || exit 1; done
+	cd bench && uv run python plot.py
+
+plots:
+	cd bench && uv run python plot.py
 
 check: lint type test
 
