@@ -17,12 +17,12 @@ All ADRs start as **Proposed** (drafted during planning, 2026-10-21). They becom
 | [0005](0005-workloads-are-os-processes.md) | Workloads are OS processes supervised by node agents | Accepted | P2 |
 | [0006](0006-functional-core-imperative-shell.md) | Functional core, imperative shell, injected clock | Accepted | P0 |
 | [0007](0007-versioned-single-writer-store.md) | Versioned single-writer store with optimistic concurrency | Accepted | P1 |
-| [0008](0008-watch-via-long-polling.md) | Watch via long-polling on resource versions | Proposed | P1 |
-| [0009](0009-level-triggered-reconciliation.md) | Level-triggered reconciliation with informers, work queue, resync | Proposed | P4 |
+| [0008](0008-watch-via-long-polling.md) | Watch via long-polling on resource versions | Accepted | P1 |
+| [0009](0009-level-triggered-reconciliation.md) | Level-triggered reconciliation with informers, work queue, resync | Accepted | P4 |
 | [0010](0010-pull-based-agents.md) | Pull-based node agents | Accepted | P2 |
 | [0011](0011-heartbeat-leases-failure-detection.md) | Heartbeat leases and a node condition state machine | Proposed | P2 |
 | [0012](0012-agent-self-fencing.md) | Self-fencing (agent + per-pod shim) to bound duplicates during partitions | Accepted | P4 |
-| [0013](0013-filter-score-scheduler.md) | Filter/score scheduler with atomic binding | Proposed (amended 2026-11-04) | P3, MVP |
+| [0013](0013-filter-score-scheduler.md) | Filter/score scheduler with atomic binding | Accepted | P3, MVP |
 | [0014](0014-resource-model.md) | Resource model: an integer resource map (millicores, bytes, extended units), request-based | Proposed (amended 2026-11-04) | P0/P3, MVP |
 | [0015](0015-wal-and-snapshots.md) | Persistence via WAL with CRC framing and snapshots | Accepted | P6 |
 | [0016](0016-deterministic-simulation-testing.md) | Deterministic simulation testing | Proposed | P5 |
@@ -31,6 +31,6 @@ All ADRs start as **Proposed** (drafted during planning, 2026-10-21). They becom
 | [0019](0019-gpu-extended-resource.md) | GPUs as an integer, non-shareable, hard-constrained resource with slot assignment | Deferred – Stage 2 | Stage 2 (P9) |
 | [0020](0020-run-to-completion-jobs.md) | Run-to-completion `Job` kind | Deferred – Stage 2 | Stage 2 (P9) |
 | [0021](0021-cuda-workload-toolchain.md) | CUDA workloads via numba-cuda, with a simulate mode | Deferred – Stage 2 | Stage 2 (P9) |
-| [0022](0022-week-1-mvp-scope.md) | MVP scope (formerly "Week-1 MVP"): temporary shortcuts and their pay-down plan | Accepted (`v0.1-mvp`) | Stage 1, Part A |
+| [0022](0022-week-1-mvp-scope.md) | MVP scope (formerly "Week-1 MVP"): temporary shortcuts and their pay-down plan | Deprecated (end of PM-3) | Stage 1, Part A |
 | [0023](0023-extension-seams.md) | Extension seams: resource map, extended resources and small registries | Proposed | Stage 1 |
 | [0024](0024-prometheus-grafana-observability.md) | Prometheus + Grafana for metrics and dashboards (required) | Proposed | Stage 1, PM-5 |

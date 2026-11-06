@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P1 | — | — |
+| Accepted | 2026-11-06 | P1 | — | — |
 
 ## 1. What
 Clients learn about changes with `GET /api/v1/watch/{kind}?since=<rev>`: the server returns all matching events after `rev` immediately, or **blocks** until one arrives or a timeout passes. If `rev` is older than the retained history, it returns **410 Gone** and the client must **relist**. Events are never silently skipped.
@@ -70,6 +70,9 @@ loop:
 - **Control-plane restart:** the buffer is empty and the revision is restored from the WAL. Any `since` < current → 410 → relist. Correct, and it exercises the relist path in every chaos run.
 - **Client slower than the event rate:** eventually 410 → relist (self-correcting).
 - **Request lost in a partition:** the client times out (`timeout + 5 s`) and retries from the same `since`. This is idempotent.
+
+### Implementation status (2026-11-06)
+Implemented as designed: `store/watchlog.py` (a ring of the last `watch_history` events; one event per revision, so revision r sits in slot `(r - 1) % N` and no search is needed), `Store.watch_since`, `GET /api/v1/watch/{plural}?since=&timeout=&node=` for every registered kind, `StoreClient.watch` on both clients, and `Compacted` (410). Deviations and additions: the events carry objects **as stored**, so a Node's derived `status.allocated` is empty in watch events (it's computed on read; watchers that need it sum it from pods, as the scheduler does). `since` **newer** than the store also gets 410: that only happens when a store was restored from an older state (`--wal-sync none`), where revision numbers are being reused. In-process watches wait for the WAL's durable revision like every other read (group commit, ADR-0015), so no event a crash could take back is ever delivered. On shutdown, open HTTP watches are answered at once with an empty batch rather than cut. One real bug found by a test on the way: the in-process watch wrapped its wait in a task, which registered its waiter only when first scheduled, so a write landing in between went unnoticed until the 30 s timeout (a lost wakeup); the waiter is now registered synchronously, with no `await` between checking and registering, and a deterministic test pins it. Verification: the S6 replay property from **every** revision of random histories (whole kind, node filter, batches of 1–3) with compaction, its boundary checked by mutation; watch contract tests over both clients; informer relist on 410 and after a restart.
 
 ## 5. Consequences
 **Positive:** an explicit "you missed events" signal (S6); idempotent retries; partitions handled naturally; simple to test.

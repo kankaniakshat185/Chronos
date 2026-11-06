@@ -2,7 +2,7 @@
 
 Chronos makes strong claims: "never more than R replicas", "an acknowledged write survives a crash", "a pod never lands on a node without enough slots". Each claim is backed by tests. But a passing test only proves something if it *would fail* when the claim breaks. This log records how that was checked: by deliberately breaking the code that upholds each claim and confirming that a test notices.
 
-It covers the MVP through PM-2 (25 mutations so far), and gets a new entry every time a guarantee is added.
+It covers the MVP through PM-3 (40 entries so far), and gets a new entry every time a guarantee is added.
 
 ---
 
@@ -89,7 +89,29 @@ Columns: the guarantee (IDs from the plan's invariant list), the injected bug, t
 | 24 | Full mode actually syncs | `append()` skips `durable_sync` | sync-accounting test | ✅ caught (added together with #23's fix) |
 | 25 | (harness check) every harness case really crashes | none: measured instead | — | ❌ **40% of runs never crashed** (see 4.1) |
 
-**Score:** of 24 code mutations, 19 were caught on the first try and 5 survived. All 5 led to a new or redesigned test, and all are caught now. Entry 25 checked the test harness itself rather than the code.
+### PM-3: watch, informers, work queue, expectations, assume cache
+
+For this block the mutations were run by a small script (kept outside the repo) that, for each entry, swaps one exact anchor string for the bug, runs the named tests with `-x`, restores the file and asserts that no `MUTATION` marker is left. Same method, less typing.
+
+| # | Guarantee | Injected bug | Expected to catch | Result |
+|---|---|---|---|---|
+| 26 | S6: refuse history you don't have | compaction boundary off by one (`revision < floor - 1`) | S6 replay property | ✅ caught. At first it was the watch log's own `slot.revision == rev` assertion that fired; re-run with that assertion removed too, the property caught it on its own (`revision 2 < floor 3 must be refused`) |
+| 27 | S6: no silent skips (the plan's `watch_skip_on_compaction` canary) | below the floor, serve from the oldest retained event instead of 410 | S6 replay property | ✅ caught |
+| 28 | Node filter sees a pod *leave* | match only the new version of an object | S6 property (node `""` watcher), contract tests | ✅ caught by the property |
+| 29 | A watch can't sleep through a write | register the waiter in a task (the original lost-wakeup bug, put back) | deterministic race test | ✅ caught (timeout) |
+| 30 | Group commit: no event before it's durable | watch skips `_durable()` | group-commit ordering test (extended to watches) | ✅ caught (`watch answered` came before `sync`) |
+| 31 | S3: no duplicate creates from a stale cache (the `disable_expectations` canary) | `Expectations.satisfied()` always true | stale-cache deployment test | ✅ caught (3 tests; 3 pods become 6) |
+| 32 | No lost binds from a stale cache | the scheduler never records an assumption | assume-cache test, scheduler properties | ✅ caught (unit test + 2 properties) |
+| 33 | S6 at the client: a cache is never patched over a gap | informer logs `Compacted` but doesn't relist | informer relist test | ❌ **survived** (see 3.6); caught after the test was rewritten |
+| 34 | One reconcile per change, never zero | work queue drops a key re-added while it was being processed | work-queue unit test | ✅ caught |
+| 35 | Bursts collapse into one reconcile | work queue without dedup | work-queue unit test | ✅ caught |
+| 36 | The agent is driven by its watch | informer changes don't wake the agent's sync | `test_watch.py` (agent with a 30 s resync) | ✅ caught |
+| 37 | A started pod is reported Running promptly | no wake-up after a local start (the original bug, put back) | `test_watch.py` | ✅ caught |
+| 38 | Freed capacity reaches waiting pods | a pod that frees capacity doesn't requeue the pending ones | scheduling integration tests | ✅ caught (2 tests) |
+| 39 | A new node reaches waiting pods | node events don't requeue pending pods | integration suite | ⚠️ caught, but **only by the end-to-end demo test**; a focused unit test was added and catches it alone |
+| 40 | Never evict from a node that came back | evict on the cached NotReady, no live read | lifecycle tests, integration suite | ❌ **survived** (see 3.7); caught after a stale-node-cache test was added |
+
+**Score:** of 39 code mutations, 32 were caught on the first try and 7 survived (5 up to PM-2, 2 in PM-3). Every survivor led to a new or redesigned test, and all 39 are caught now. One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
 
 ---
 
@@ -123,6 +145,19 @@ These are the valuable cases: each one is a test that *looked* like it covered s
 **Fix:** a **sync-accounting** test that wraps `durable_sync` (recording how far into the log file each fsync covered) and `append` (recording where each record ended). It asserts that when a write is acknowledged, an fsync has already covered its record. It catches the mutation in group mode and in full mode. The planned `ack_before_fsync` canary in the simulator (PM-4) will model power loss directly.
 **Lesson:** know what your fault injection *can't* inject. `kill -9` is not power loss; for the property "synced before acknowledged", check the order directly.
 
+### 3.6 The informer test that relisted by itself (#33)
+**Bug:** the informer logs `Compacted` but carries on watching from the same revision, never relisting. Its cache would silently miss every change in the gap.
+**Why it survived:** the test called `informer.relist()` by hand, made enough writes to overflow the history, then started `informer.run()` and waited for `relists == 2`. But `run()` *starts* with a relist. That was the second relist, and the 410 path was never reached.
+**Fix:** the loop was split into `step()` (one list or one watch; a 410 only sets `needs_relist`), and the test drives it step by step: list → overflow → step (asserts 410 was seen and nothing applied) → step (asserts the relist and the exact handler calls). **Lesson:** count the events your test *causes*, not just the ones you expect; a setup step can produce the very signal you're waiting for.
+
+### 3.7 Nothing covered a stale node cache (#40)
+**Bug:** the lifecycle controller evicts based on its *cached* node condition, without the live read.
+**Why it survived:** the dangerous case is a cache that still says NotReady after the node came back *and* a new pod was bound to it. That is a narrow race the integration suite never produces.
+**Fix:** a unit test builds that exact state by hand: it relists the node informer while the node is NotReady, then re-registers the node, makes it Ready, binds a pod, and refreshes only the pod cache. Then it asserts the pod is still Bound. **Lesson:** races that real runs rarely hit need tests that *construct* the interleaving instead of waiting for it.
+
+### 3.8 Caught by the wrong test (#39, #40, first run)
+In the first batch, #39 and #40 were both reported "caught", by `test_sigterm_ignoring_workload…` and `test_two_phase_deletion…`. Neither test has anything to do with node events or eviction. Running them on *unmutated* code showed they were failing anyway (see 4.7). With that fixed, #40 survived and #39 was caught only by the demo test. **Lesson:** a mutation counts as caught only if the failing test is one that *should* fail, and the same test passes without the mutation. Check flakiness first.
+
 ---
 
 ## 4. Tests that were wrong
@@ -147,6 +182,12 @@ Two shim tests timed the fence timeout from *after* the shim process started (ab
 ### 4.6 Waiting for something impossible (PM-1)
 The first freeze test waited until "the store and the live processes agree" while the old workload was *frozen*, and frozen processes count as alive, so they could never agree. It failed before resuming the frozen processes, teardown then hung on them, and processes were left behind. **Fix:** check the store only during the freeze; teardown now SIGCONTs everything first and SIGKILLs agents that don't stop.
 
+### 4.7 Running is not "ready" (PM-3)
+Two MVP tests delete a SIGTERM-ignoring workload and check that it survives SIGTERM until the grace period ends. After the move to watches, the workload died from SIGTERM 50 ms after starting. The agent now reports Running the moment the process starts (polling used to add ≥ 100 ms), and the tests deleted the pod before the Python workload had installed its `SIG_IGN` handler. **Fix:** the tests wait for the workload's first output line, which it prints after installing the handler. The product was right; the tests relied on a delay that polling happened to provide. **Lesson:** making a system faster exposes tests that depended on it being slow.
+
+### 4.8 Two "stale cache" tests whose caches weren't stale (PM-3)
+Two tests, caught while writing them: (a) the orphan-GC test was meant to show that a controller whose *deployment* cache is behind doesn't delete the deployment's pods, but its deployment cache had in fact been refreshed, so it showed nothing; it now uses a second controller whose deployment cache is empty. (b) The node-event test failed with a Conflict because its *pod* cache was stale as well (it hadn't seen the `Unschedulable` status write), which a live system's watch would have delivered. **Lesson:** in a test about stale caches, write down which cache is stale and which is fresh, and set each one up deliberately.
+
 ---
 
 ## 5. Real bugs the tests found
@@ -163,6 +204,10 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 | PM-1 | `signal.signal(SIGKILL, …)` raises, so the shim couldn't pass on "killed by SIGKILL" | shim exit-code test |
 | PM-1 | proxy deadlock: on Python 3.12 `Server.wait_closed()` waits for open connections | partition test hanging |
 | PM-2 | `chronosd wal-verify` would have truncated a torn tail while "verifying" | review while writing the CLI |
+| PM-3 | **lost wakeup**: the in-process watch registered its waiter inside a task, so a write landing before the task first ran went unnoticed until the 30 s timeout | the X-6 widget test (it creates an object right at startup), then pinned by a deterministic race test (#29) |
+| PM-3 | a pod started by the agent was never reported Running: reporting needs a second sync, and nothing triggered one without polling | `test_watch.py` (#37) |
+| PM-3 | chronosd took more than 10 s to stop: uvicorn waited for the agents' 30 s long-poll watches | integration teardown timing out |
+| PM-3 | the first fix for that hung chronosd for good: answering *every* watch at once on shutdown made the in-process informers spin without ever yielding to the event loop | integration teardown again; about 30 leaked test servers at 20% CPU each (load average 180), which is how it was noticed. `Cluster.close()` now SIGKILLs a chronosd that ignores SIGTERM and fails the test |
 
 **Found only on Linux** (macOS was fine), all in the test harness:
 - macOS `tar` adds AppleDouble `._*` files to a copy; ruff failed on 79 of them.
@@ -181,7 +226,10 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 
 ## 7. Talking points
 
-- *"How do you know your tests work?"* I break the code on purpose. 24 hand-picked, realistic bugs against named invariants; 19 caught on the first try, 5 survived, and each of those taught me something specific about my tests (sections 3.1–3.5).
+- *"How do you know your tests work?"* I break the code on purpose. 39 hand-picked, realistic bugs against named invariants; 32 caught on the first try, 7 survived, and each of those taught me something specific about my tests (sections 3.1–3.7).
+- *A mutation caught by a flaky test isn't caught* (3.8): check that the failing test is the one that should fail.
+- *Construct the race, don't wait for it* (3.7, and the lost-wakeup test): a stale cache or a write in a 1-line gap won't show up in a real run often enough to trust.
+- *Making the system faster broke two tests* (4.7): they relied on polling's delay.
 - *Defence in depth hides bugs from tests* (3.2): the agent and the shim both fence, so a test must switch one off to prove the other works.
 - *`kill -9` is not power loss* (3.5): crash tests can't see a missing fsync; sync accounting can.
 - *Crash tests don't cover error paths* (3.4): disk full is not a crash.
@@ -189,4 +237,4 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 - *Run it on the other OS* (section 5): three harness bugs existed only on Linux.
 
 ### Blog outline
-"I broke my orchestrator 24 times on purpose": the method (section 1) → three stories (3.2 the agent rescuing the shim, 3.5 the invisible fsync, 4.1 the harness that didn't crash) → the benchmark showing why group commit exists (10× throughput at 32 writers) → what I'd automate next (the simulator's canaries).
+"I broke my orchestrator 39 times on purpose": the method (section 1) → three stories (3.2 the agent rescuing the shim, 3.5 the invisible fsync, 4.1 the harness that didn't crash) → the benchmark showing why group commit exists (10× throughput at 32 writers) → what I'd automate next (the simulator's canaries).

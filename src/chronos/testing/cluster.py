@@ -87,7 +87,7 @@ class Timings:
     heartbeat_interval: float = 0.2
     node_grace: float = 0.8
     eviction_timeout: float = 2.0
-    poll_interval: float = 0.1
+    resync_interval: float = 0.1
     fence_timeout: float = 1.0
     termination_grace: float = 0.5
     drift_margin: float = 0.2
@@ -163,7 +163,7 @@ class Cluster:
             "chronos.agent.main", "run", "--name", name, "--cpu", cpu, "--mem", mem,
             "--server", server or self.url, "--data-dir", str(self.agent_dir(name)),
             "--heartbeat-interval", str(t.heartbeat_interval),
-            "--poll-interval", str(t.poll_interval),
+            "--resync-interval", str(t.resync_interval),
             "--fence-timeout", str(t.fence_timeout),
             "--termination-grace", str(t.termination_grace),
             "--drift-margin", str(t.drift_margin),
@@ -215,7 +215,12 @@ class Cluster:
             self.stop_agent(name)
         if self._server is not None:
             self._server.terminate()
-            self._server.wait(timeout=10)
+            try:
+                self._server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._server.kill()  # fail the test, but don't leave it running
+                self._server.wait(timeout=5)
+                raise AssertionError("chronosd didn't stop within 10 s of SIGTERM") from None
 
         async def none_alive() -> bool:
             return not any(alive(g) for g in self.pod_pgids())

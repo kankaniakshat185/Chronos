@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from chronos.api.meta import ObjectMeta
+from chronos.api.meta import ApiObject, ObjectMeta
 from chronos.api.resources import ResourceMap
 
 
@@ -32,9 +32,7 @@ class NodeStatus(BaseModel):
     agent_epoch: str = ""
 
 
-class Node(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class Node(ApiObject):
     kind: Literal["Node"] = "Node"
     metadata: ObjectMeta
     spec: NodeSpec = NodeSpec()

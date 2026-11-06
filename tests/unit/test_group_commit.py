@@ -77,9 +77,19 @@ async def test_nothing_is_answered_before_its_state_is_durable(tmp_path: Path) -
             await c.create(pod("a"))  # the error itself reveals the pending write
         events.append("error answered")
 
-    await asyncio.gather(write(), read(), conflict())
+    async def watch() -> None:
+        batch = await c.watch(Pod, 0, wait=5.0)  # already waiting when the write lands
+        assert [e.object.metadata.name for e in batch.events] == ["a"]
+        events.append("watch answered")
+
+    await asyncio.gather(watch(), write(), read(), conflict())
     assert events[0] == "sync"
-    assert sorted(events[1:]) == ["error answered", "read answered", "write acked"]
+    assert sorted(events[1:]) == [
+        "error answered",
+        "read answered",
+        "watch answered",
+        "write acked",
+    ]
 
 
 async def test_reopen_after_group_commit_has_everything_acked(tmp_path: Path) -> None:

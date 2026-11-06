@@ -7,7 +7,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from chronos.api.meta import ObjectMeta
+from chronos.api.meta import ApiObject, ObjectMeta
 from chronos.api.resources import ResourceRequirements
 from chronos.api.workload_types import workload_type
 
@@ -62,9 +62,7 @@ class PodStatus(BaseModel):
     assigned: dict[str, list[str]] = {}  # extended resource -> unit ids (X-5, S12)
 
 
-class Pod(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class Pod(ApiObject):
     kind: Literal["Pod"] = "Pod"
     metadata: ObjectMeta
     spec: PodSpec

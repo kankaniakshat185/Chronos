@@ -2,6 +2,7 @@
 
 from chronos.store.errors import (
     AlreadyExists,
+    Compacted,
     Conflict,
     InsufficientCapacity,
     Invalid,
@@ -12,6 +13,7 @@ from chronos.store.store import Store
 
 __all__ = [
     "AlreadyExists",
+    "Compacted",
     "Conflict",
     "InsufficientCapacity",
     "Invalid",

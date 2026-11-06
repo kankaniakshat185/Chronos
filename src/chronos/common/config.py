@@ -18,9 +18,8 @@ class Timings(BaseModel):
     heartbeat_timeout: float = Field(default=0.8, gt=0)
     node_grace: float = Field(default=4.0, gt=0)
     eviction_timeout: float = Field(default=10.0, gt=0)
-    lifecycle_tick: float = Field(default=0.25, gt=0)
-    scheduler_tick: float = Field(default=0.25, gt=0)
-    deployment_tick: float = Field(default=0.25, gt=0)
+    lifecycle_tick: float = Field(default=0.25, gt=0)  # node monitor period (ADR-0011)
+    resync_period: float = Field(default=30.0, gt=0)  # controllers re-queue every key (ADR-0009)
     request_timeout: float = Field(default=2.0, gt=0)
 
     @model_validator(mode="after")

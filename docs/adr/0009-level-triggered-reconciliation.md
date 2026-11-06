@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P4 | — | — |
+| Accepted | 2026-11-06 | P4 | — | — |
 
 ## 1. What
 Controllers are **level-triggered**: events only say "something about key K may have changed"; the controller then reads the *current* desired and observed state for K and computes the full difference. A shared runtime provides **informers** (cached list+watch), a **deduplicating, rate-limited work queue**, **expectations** to tolerate stale caches, and **periodic resync**.
@@ -76,6 +76,9 @@ def reconcile(dep, pods, exp) -> list[Action]:
 - **Controller crash mid-reconcile:** on restart, informers relist and a full reconcile recomputes the diff. Partially executed actions are simply observed state.
 - **Owner deleted:** pods with a missing owner are garbage-collected by the deployment controller (DeletePod).
 - **Scale-down racing with scheduling:** victims prefer Pending pods, so binding races mostly don't matter; a CAS conflict just requeues.
+
+### Implementation status (2026-11-06)
+Implemented in `controllers/runtime.py`: `Informer` (list, then long-poll watch; relist on 410; handlers get `(old, new)`, and a relist reports exactly the difference; optional indexes), `Informers` (one shared informer per kind, like client-go's SharedInformerFactory), `WorkQueue` (dedup, one in-flight per key, a key re-added while processing is queued again when done, per-key backoff 5 ms → 30 s), `Expectations` (creates counted, deletes tracked by name so a pod seen terminating and then gone counts once; TTL 30 s), `Controller` (one worker, resync every `resync_period`, 30 s), and the controller registry (X-6). Deviations: the deployment controller's keys are deployment **uids** (what pods carry in `metadata.owner`), so a pod event maps straight to its key and a deleted deployment's key still finds its pods; garbage collection of orphans confirms the owner is gone with a live read before deleting. The node lifecycle controller resyncs every `lifecycle_tick` (250 ms), not 30 s, because heartbeat silence grows without any store event; it also confirms NotReady with a live read before evicting, so a stale node cache can't evict pods from a node that has already come back. The agent uses the same `Informer` on `pods?node=self` and syncs on every cache change, every local process start or exit, and at least every `--resync-interval` (1 s; crash-loop backoffs expire with no event). No jitter in the queue backoff (deterministic for the simulator, PM-4). Verification: work-queue and expectations unit tests on a FakeClock; the expectations stale-cache test (the `disable_expectations` canary, checked by mutation: 3 pods become 6 without it); informer relist tests; the MVP integration suite passing on the new runtime, with one change: two tests now wait for the workload's first output line before deleting it, because `Running` is reported the moment the process starts (polling used to add ≥ 100 ms) and the SIGTERM-ignoring workload hadn't installed its handler yet; `test_watch.py` runs the agent with a 30 s resync to prove the watch, not a timer, drives it.
 
 ## 5. Consequences
 **Positive:** self-healing from lost events, crashes and even controller bugs (resync); each part is unit-testable; maps 1:1 onto client-go vocabulary.

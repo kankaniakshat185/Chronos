@@ -1,5 +1,8 @@
 """The `chronosd` HTTP API (PLAN.md section 4.4, ADR-0004).
 
+Every registered kind (X-6) gets the same routes, under its plural name: CRUD,
+`/status`, and a long-poll watch at `/watch/<plural>?since=` (ADR-0008).
+
 Handlers are `async def` on purpose: they run on the event loop, one at a time
 between awaits, so the synchronous store keeps a single writer. A plain `def`
 handler would run in a thread pool and break that.
@@ -15,12 +18,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
-from chronos.api import Deployment, Node, Pod
-from chronos.api.kinds import PLURALS
+from chronos.api import ApiObject
 from chronos.api.wire import BindingRequest, ErrorBody, HeartbeatRequest, RegisterRequest
 from chronos.client.local import LocalStoreClient
+from chronos.client.protocol import WATCH_TIMEOUT
 from chronos.common.config import FencingConfig
 from chronos.store import Invalid, StoreError
+from chronos.store.kinds import KINDS
 
 PREFIX = "/api/v1"
 
@@ -64,7 +68,8 @@ def create_app(client: LocalStoreClient, loops: list[Loop] | None = None) -> Fas
     """`loops` are the controllers' run() coroutines, started with the server."""
 
     @contextlib.asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.closing = asyncio.Event()  # set on shutdown: open watches answer at once
         tasks = [asyncio.create_task(loop()) for loop in loops or []]
         try:
             yield
@@ -83,9 +88,8 @@ def create_app(client: LocalStoreClient, loops: list[Loop] | None = None) -> Fas
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    _add_kind_routes(app, client, Node)
-    _add_kind_routes(app, client, Pod)
-    _add_kind_routes(app, client, Deployment)
+    for kind in KINDS.values():
+        _add_kind_routes(app, client, kind.model, kind.plural)
 
     @app.post(PREFIX + "/pods/{name}/binding")
     async def bind(name: str, request: Request) -> JSONResponse:
@@ -110,10 +114,10 @@ def create_app(client: LocalStoreClient, loops: list[Loop] | None = None) -> Fas
     return app
 
 
-def _add_kind_routes[T: (Node, Pod, Deployment)](
-    app: FastAPI, client: LocalStoreClient, kind: type[T]
+def _add_kind_routes[T: ApiObject](
+    app: FastAPI, client: LocalStoreClient, kind: type[T], plural: str
 ) -> None:
-    base = f"{PREFIX}/{PLURALS[kind]}"
+    base = f"{PREFIX}/{plural}"
 
     async def parse_named(request: Request, name: str) -> T:
         obj = await _parse(request, kind)
@@ -142,6 +146,32 @@ def _add_kind_routes[T: (Node, Pod, Deployment)](
     ) -> JSONResponse:
         return _json(await client.delete(kind, name, resource_version, force=force))
 
+    async def watch(
+        request: Request,
+        since: int,
+        timeout: float = WATCH_TIMEOUT,  # noqa: ASYNC109 (how long to hold the poll)
+        node: str | None = None,
+    ) -> dict[str, object]:
+        watching = asyncio.ensure_future(
+            client.watch(kind, since, wait=max(timeout, 0.0), node_name=node)
+        )
+        closing: asyncio.Event | None = getattr(request.app.state, "closing", None)
+        if closing is not None:
+            stopping = asyncio.ensure_future(closing.wait())
+            try:
+                await asyncio.wait({watching, stopping}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                stopping.cancel()
+            if not watching.done():  # shutting down: an empty batch; the client re-watches
+                watching.cancel()
+                return {"events": [], "revision": since}
+        batch = await watching
+        events = [
+            {"type": e.type, "object": e.object.model_dump(mode="json")} for e in batch.events
+        ]
+        return {"events": events, "revision": batch.revision}
+
+    app.add_api_route(f"{PREFIX}/watch/{plural}", watch, methods=["GET"])
     app.add_api_route(base, list_objects, methods=["GET"])
     app.add_api_route(base, create, methods=["POST"])
     app.add_api_route(base + "/{name}", get, methods=["GET"])

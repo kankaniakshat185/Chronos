@@ -48,7 +48,10 @@ def run(
     server: str = "http://127.0.0.1:7070",
     data_dir: Annotated[Path | None, typer.Option(help="Default: ~/.chronos/agents/NAME")] = None,
     heartbeat_interval: float = 1.0,
-    poll_interval: float = 0.5,
+    resync_interval: Annotated[
+        float,
+        typer.Option(help="Re-run the sync at least this often (it also runs on every change)."),
+    ] = 1.0,
     fence_timeout: Annotated[
         float,
         typer.Option(help="Stop all workloads after this long without an accepted heartbeat."),
@@ -96,7 +99,7 @@ def run(
         ),
         clock=RealClock(),
         fencing=fencing,
-        poll_interval=poll_interval,
+        resync_interval=resync_interval,
         backoff=Backoff(crash_backoff_base, crash_backoff_cap, crash_backoff_reset),
     )
     try:

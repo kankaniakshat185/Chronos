@@ -21,3 +21,19 @@ class ObjectMeta(BaseModel):
     deletion_timestamp: datetime | None = None
     labels: dict[str, str] = {}
     owner: str | None = None  # uid of the owning object
+
+
+class ApiObject(BaseModel):
+    """What every kind is: a `kind` name, metadata, and the spec/status split (X-6).
+
+    Kinds subclass it with their own `kind` literal and spec/status models, and are
+    registered with `chronos.store.kinds.register_kind`; nothing else in the store,
+    the API or the controller runtime needs to know them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    metadata: ObjectMeta
+    spec: BaseModel
+    status: BaseModel

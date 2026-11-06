@@ -15,6 +15,11 @@ object, or `delete`) that is written and synced *before* memory changes, so an
 acknowledged write survives a crash (S8). `Store.open()` rebuilds the state from the
 newest snapshot plus the records after it, through the same `_apply_*` functions the
 live path uses.
+
+Kinds come from the registry (`chronos.store.kinds`, X-6): their write rules and
+secondary indexes are looked up there, so a newly registered kind gets the same
+CAS, durability and watch behaviour with no change here. Every write appends one
+event to the watch log (ADR-0008), which is what `watch_since` serves.
 """
 
 from __future__ import annotations
@@ -25,8 +30,8 @@ import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from chronos.api import Deployment, Node, NodeCondition, Pod, PodPhase
-from chronos.api.kinds import Obj
+from chronos.api import Node, NodeCondition, Pod, PodPhase
+from chronos.api.meta import ApiObject
 from chronos.api.resources import add, insufficient, sub
 from chronos.common.clock import Clock
 from chronos.store.codec import Record
@@ -38,18 +43,13 @@ from chronos.store.errors import (
     NotFound,
     Unavailable,
 )
-from chronos.store.validation import (
-    TERMINAL,
-    validate_create,
-    validate_spec_update,
-    validate_status_update,
-)
+from chronos.store.kinds import NODE_INDEX, KindError, KindInfo, info
+from chronos.store.validation import TERMINAL, validate_spec_update
 from chronos.store.wal import DEFAULT_SEGMENT_SIZE, Snapshot, SyncMode, Wal, recover
+from chronos.store.watchlog import DEFAULT_HISTORY, Event, EventType, WatchLog
 
 log = logging.getLogger(__name__)
 
-KINDS: tuple[type[Obj], ...] = (Node, Pod, Deployment)
-MODELS: dict[str, type[Obj]] = {kind.__name__: kind for kind in KINDS}
 DEFAULT_SNAPSHOT_EVERY = 5_000
 
 UNBOUND = ""
@@ -67,13 +67,16 @@ class Store:
         *,
         wal: Wal | None = None,
         snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
+        watch_history: int = DEFAULT_HISTORY,
     ) -> None:
         self._clock = clock
         self._new_uid = uid_factory
         self._revision = 0
-        self._objects: dict[str, dict[str, Obj]] = {kind.__name__: {} for kind in KINDS}
-        # Secondary index: node name -> names of pods bound to it ("" = unbound).
-        self._pods_by_node: dict[str, set[str]] = {}
+        self._objects: dict[str, dict[str, ApiObject]] = {}  # kind -> name -> object
+        # Registered secondary indexes: (kind, index) -> key -> names, e.g. the pods
+        # bound to each node ("" = unbound).
+        self._indexes: dict[tuple[str, str], dict[str, set[str]]] = {}
+        self.watch = WatchLog(watch_history)
         self._wal = wal
         self._snapshot_every = snapshot_every
         self._since_snapshot = 0
@@ -88,6 +91,7 @@ class Store:
         sync: SyncMode = "full",
         segment_size: int = DEFAULT_SEGMENT_SIZE,
         snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
+        watch_history: int = DEFAULT_HISTORY,
         uid_factory: Callable[[], str] = _new_uid,
     ) -> Store:
         """Recover the state in `data_dir` (created if missing) and keep logging there.
@@ -96,13 +100,14 @@ class Store:
         """
         data_dir.mkdir(parents=True, exist_ok=True)
         found = recover(data_dir)
-        store = cls(clock, uid_factory, snapshot_every=snapshot_every)
+        store = cls(clock, uid_factory, snapshot_every=snapshot_every, watch_history=watch_history)
         if found.snapshot is not None:
             for kind, obj in found.snapshot.objects:
-                store._apply_put(MODELS[kind].model_validate(obj))
+                store._apply_put(info(kind).model.model_validate(obj), event=False)
             store._revision = found.snapshot.revision
         for record in found.records:
             store._apply(record)
+        store.watch.reset(store._revision)  # history before the crash is gone (ADR-0008)
         store._wal = Wal(data_dir, store._revision + 1, sync=sync, segment_size=segment_size)
         store._durable = store._revision
         log.info(
@@ -145,10 +150,10 @@ class Store:
 
     # ---- reads ---------------------------------------------------------------
 
-    def get[T: (Node, Pod, Deployment)](self, kind: type[T], name: str) -> T:
+    def get[T: ApiObject](self, kind: type[T], name: str) -> T:
         return self._present(self._get(kind, name))
 
-    def list[T: (Node, Pod, Deployment)](
+    def list[T: ApiObject](
         self,
         kind: type[T],
         *,
@@ -157,14 +162,12 @@ class Store:
     ) -> tuple[builtins.list[T], int]:
         """Objects sorted by name, plus the revision they were read at.
 
-        `node_name` filters pods through the index ("" selects unbound pods).
+        `node_name` filters through the kind's node index ("" selects unbound pods).
         """
-        if node_name is not None and kind is not Pod:
-            raise Invalid("node_name filter only applies to Pod")
         if node_name is None:
-            names = sorted(self._objects[kind.__name__])
+            names = sorted(self._objects.get(kind.__name__, {}))
         else:
-            names = sorted(self._pods_by_node.get(node_name, ()))
+            names = sorted(self._index(kind, node_name))
         items = [self._get(kind, name) for name in names]
         if labels:
             items = [o for o in items if labels.items() <= o.metadata.labels.items()]
@@ -176,19 +179,51 @@ class Store:
     def allocated(self, node_name: str) -> dict[str, int]:
         """Sum of requests of the non-terminal pods bound to the node (derived, never stored)."""
         total: dict[str, int] = {}
-        for name in self._pods_by_node.get(node_name, ()):
+        for name in self._indexes.get(("Pod", NODE_INDEX), {}).get(node_name, ()):
             pod = self._get(Pod, name)
             if pod.status.phase not in TERMINAL:
                 total = add(total, pod.requests)
         return total
 
+    def watch_since[T: ApiObject](
+        self, kind: type[T], revision: int, *, node_name: str | None = None, limit: int = 500
+    ) -> tuple[builtins.list[tuple[EventType, T]], int]:
+        """(event type, object) for each change to `kind` after `revision`, oldest first,
+        and the revision the caller has now seen everything up to (ADR-0008).
+
+        `node_name` matches objects whose node index key is that node in either the
+        old or the new version, so an agent sees its pod's deletion. Raises Compacted
+        if the history after `revision` is no longer complete.
+        """
+        name = kind.__name__
+        index = self._index_fn(kind) if node_name is not None else None
+
+        def match(event: Event) -> bool:
+            if event.object.kind != name:
+                return False
+            if index is None:
+                return True
+            return index(event.object) == node_name or (
+                event.old is not None and index(event.old) == node_name
+            )
+
+        events = self.watch.since(revision, match, limit)
+        seen = events[-1].revision if len(events) >= limit else self._revision
+        out = []
+        for event in events:
+            obj = event.object.model_copy(deep=True)
+            assert isinstance(obj, kind)
+            out.append((event.type, obj))
+        return out, seen
+
     # ---- writes --------------------------------------------------------------
 
-    def create[T: (Node, Pod, Deployment)](self, obj: T) -> T:
+    def create[T: ApiObject](self, obj: T) -> T:
         name = obj.metadata.name
-        if name in self._objects[obj.kind]:
+        kind = self._kind(type(obj))
+        if name in self._objects.get(obj.kind, {}):
             raise AlreadyExists(obj.kind, name)
-        validate_create(obj)
+        kind.validate_create(obj)
         new = obj.model_copy(deep=True)
         new.metadata.uid = self._new_uid()
         new.metadata.generation = 1
@@ -196,10 +231,11 @@ class Store:
         new.metadata.deletion_timestamp = None
         return self._commit(new)
 
-    def update[T: (Node, Pod, Deployment)](self, obj: T) -> T:
+    def update[T: ApiObject](self, obj: T) -> T:
         """CAS write of spec and labels; status in `obj` is ignored."""
         current = self._get_for_write(obj)
         validate_spec_update(current, obj)
+        self._kind(type(obj)).validate_spec_update(current, obj)
         new = current.model_copy(deep=True)
         new.metadata.labels = dict(obj.metadata.labels)
         new.spec = obj.spec.model_copy(deep=True)
@@ -215,17 +251,17 @@ class Store:
             new.metadata.generation += 1
         return self._commit(new)
 
-    def update_status[T: (Node, Pod, Deployment)](self, obj: T) -> T:
+    def update_status[T: ApiObject](self, obj: T) -> T:
         """CAS write of status only; spec and metadata in `obj` are ignored."""
         current = self._get_for_write(obj)
-        validate_status_update(current, obj)
+        self._kind(type(obj)).validate_status_update(current, obj)
         new = current.model_copy(deep=True)
         new.status = obj.status.model_copy(deep=True)
         if isinstance(new, Node):
             new.status.allocated = {}  # derived on read; never stored
         return self._commit(new)
 
-    def delete[T: (Node, Pod, Deployment)](
+    def delete[T: ApiObject](
         self, kind: type[T], name: str, expected_rv: int | None = None, *, force: bool = False
     ) -> T:
         """Delete an object (P4.7: two-phase for pods that may have a running process).
@@ -249,12 +285,10 @@ class Store:
             marked = current.model_copy(deep=True)
             marked.metadata.deletion_timestamp = self._clock.wall()
             return self._commit(marked)
-        gone = current.model_copy(deep=True)
-        gone.metadata.resource_version = self._log(
-            Record(self._revision + 1, "delete", kind.__name__, name)
-        )
-        self._apply_delete(kind.__name__, name)
-        return gone
+        self._log(Record(self._revision + 1, "delete", kind.__name__, name))
+        gone = self._apply_delete(kind.__name__, name)
+        assert isinstance(gone, kind)
+        return self._present(gone)
 
     def bind(self, pod_name: str, node_name: str, expected_rv: int) -> Pod:
         """Atomically assign an unbound pod to a node that has room for it (S1, S2, S11).
@@ -286,24 +320,40 @@ class Store:
 
     # ---- internals -----------------------------------------------------------
 
-    def _get[T: (Node, Pod, Deployment)](self, kind: type[T], name: str) -> T:
-        obj = self._objects[kind.__name__].get(name)
+    def _kind(self, kind: type[ApiObject]) -> KindInfo:
+        try:
+            return info(kind)
+        except KindError as exc:
+            raise Invalid(str(exc)) from None
+
+    def _index_fn(self, kind: type[ApiObject]) -> Callable[[ApiObject], str]:
+        fn = self._kind(kind).indexes.get(NODE_INDEX)
+        if fn is None:
+            raise Invalid(f"{kind.__name__} has no node index: node_name doesn't apply")
+        return fn
+
+    def _index(self, kind: type[ApiObject], key: str) -> set[str]:
+        self._index_fn(kind)
+        return self._indexes.get((kind.__name__, NODE_INDEX), {}).get(key, set())
+
+    def _get[T: ApiObject](self, kind: type[T], name: str) -> T:
+        obj = self._objects.get(kind.__name__, {}).get(name)
         if not isinstance(obj, kind):
             raise NotFound(kind.__name__, name)
         return obj
 
-    def _get_for_write[T: (Node, Pod, Deployment)](self, obj: T) -> T:
+    def _get_for_write[T: ApiObject](self, obj: T) -> T:
         current = self._get(type(obj), obj.metadata.name)
         self._check_rv(current, obj.metadata.resource_version)
         return current
 
-    def _check_rv(self, current: Obj, expected: int) -> None:
+    def _check_rv(self, current: ApiObject, expected: int) -> None:
         if expected != current.metadata.resource_version:
             raise Conflict(
                 current.kind, current.metadata.name, expected, current.metadata.resource_version
             )
 
-    def _commit[T: (Node, Pod, Deployment)](self, new: T) -> T:
+    def _commit[T: ApiObject](self, new: T) -> T:
         """The only place a stored object is replaced. All checks happen before it."""
         new.metadata.resource_version = self._revision + 1
         self._log(
@@ -328,29 +378,46 @@ class Store:
         return record.rev
 
     def _apply(self, record: Record) -> None:
+        """Replay one logged change (recovery): no watch event, nothing logged again."""
         if record.op == "delete":
-            self._apply_delete(record.kind, record.name)
+            self._apply_delete(record.kind, record.name, event=False)
         else:
-            self._apply_put(MODELS[record.kind].model_validate(record.obj))
+            self._apply_put(info(record.kind).model.model_validate(record.obj), event=False)
         self._revision = record.rev
 
-    def _apply_put(self, obj: Obj) -> None:
+    def _reindex(self, old: ApiObject | None, new: ApiObject | None) -> None:
+        obj = new or old
+        assert obj is not None
+        for index, key_of in info(obj.kind).indexes.items():
+            keys = self._indexes.setdefault((obj.kind, index), {})
+            if old is not None:
+                keys[key_of(old)].discard(old.metadata.name)
+            if new is not None:
+                keys.setdefault(key_of(new), set()).add(new.metadata.name)
+
+    def _apply_put(self, obj: ApiObject, *, event: bool = True) -> None:
         name = obj.metadata.name
-        old = self._objects[obj.kind].get(name)
-        if isinstance(old, Pod):
-            self._pods_by_node[old.spec.node_name].discard(name)
-        if isinstance(obj, Pod):
-            self._pods_by_node.setdefault(obj.spec.node_name, set()).add(name)
+        old = self._objects.setdefault(obj.kind, {}).get(name)
+        self._reindex(old, obj)
         self._objects[obj.kind][name] = obj
         self._revision = obj.metadata.resource_version
+        if event:
+            self.watch.append(
+                Event("ADDED" if old is None else "MODIFIED", self._revision, obj, old)
+            )
         self._after_write()
 
-    def _apply_delete(self, kind: str, name: str) -> None:
+    def _apply_delete(self, kind: str, name: str, *, event: bool = True) -> ApiObject:
+        """Returns the object's last state, stamped with the deletion's revision."""
         old = self._objects[kind].pop(name)
-        if isinstance(old, Pod):
-            self._pods_by_node[old.spec.node_name].discard(name)
+        self._reindex(old, None)
         self._revision += 1
+        gone = old.model_copy(deep=True)
+        gone.metadata.resource_version = self._revision
+        if event:
+            self.watch.append(Event("DELETED", self._revision, gone, old))
         self._after_write()
+        return gone
 
     def _after_write(self) -> None:
         if self._wal is None:
@@ -368,7 +435,7 @@ class Store:
         ]
         return Snapshot(self._revision, objects)
 
-    def _present[T: (Node, Pod, Deployment)](self, obj: T) -> T:
+    def _present[T: ApiObject](self, obj: T) -> T:
         out = obj.model_copy(deep=True)
         if isinstance(out, Node):
             # Same keys as capacity (zeros included), plus anything bound beyond it.

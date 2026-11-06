@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Accepted (2026-11-04, `v0.1-mvp`; → Deprecated at end of PM-3; → Superseded at Stage 1 exit) | 2026-10-24 (revised 2026-11-04) | Stage 1, Part A | — | — |
+| Deprecated (2026-11-06, end of PM-3: every shortcut below is paid down; → Superseded at Stage 1 exit) | 2026-10-24 (revised 2026-11-04) | Stage 1, Part A | — | — |
 
 > **Revised 2026-11-04:** the plan was split into Stage 1 (Orchestration) and Stage 2 (GPU/CUDA, deferred). The MVP now demonstrates the hard-constraint rule with a generic extended resource (`chronos.dev/slot`) instead of a simulated GPU. The original one-week framing is retired; the plan now defines order and scope only, with no hour estimates.
 
@@ -48,8 +48,8 @@ All MVP code lives in the final module layout (PLAN.md §4.6). The MVP-only part
 ### Mechanism: the shortcuts and why each is safe *for now*
 | Shortcut | Why it's safe in the MVP | Becomes unsafe when | Removed in |
 |----------|-------------------------|---------------------|------------|
-| Polling over the **authoritative** store (no watch) | Level-triggered full recompute each tick | Never unsafe; just unscalable | PM-3 |
-| No expectations / assume cache | Reads aren't cached, so there's no stale-read window | **The moment any controller reads from a cache.** They must ship in the same change as informers. | PM-3 |
+| Polling over the **authoritative** store (no watch) | Level-triggered full recompute each tick | Never unsafe; just unscalable | ~~PM-3~~ paid down (2026-11-06) |
+| No expectations / assume cache | Reads aren't cached, so there's no stale-read window | **The moment any controller reads from a cache.** They must ship in the same change as informers. | ~~PM-3~~ paid down (2026-11-06), in the same change as informers |
 | No fencing / shim | Fault model is crash-stop of the whole node | Partition, pause, or agent-only crash | ~~PM-1~~ paid down (2026-11-05) |
 | No WAL | Documented: restart = total state loss | Any `chronosd` restart | ~~PM-2~~ paid down (2026-11-06) |
 | One-phase deletion | Agent stops unknown processes on its next poll | Never unsafe; bounded run window | ~~PM-1~~ paid down (2026-11-05) |
@@ -62,14 +62,13 @@ All MVP code lives in the final module layout (PLAN.md §4.6). The MVP-only part
 |-----|---------------|----------------|
 | 0001–0004, 0006, 0007 | **Accepted** | — |
 | 0005, 0010, 0012 | **Accepted** at the end of PM-1 (2026-11-05) | — |
-| 0009 | Proposed (partial) | informer, work queue, expectations, resync |
+| 0008, 0009, 0013 | **Accepted** at the end of PM-3 (2026-11-06) | — (`MostAllocated` is PM-5) |
 | 0011 | Proposed (partial) | mass-eviction guard (startup grace done in PM-2) |
-| 0013 | Proposed (partial) | assume cache, `MostAllocated` (X-3 registry done) |
 | 0014 | Proposed (partial) | memory-limit enforcement (X-1/X-2 done) |
-| 0017 | Proposed (partial) | `workload_type` validation needs X-4 (PM-1); kind dispatch via X-6 (PM-3) |
-| 0023 | Proposed (partial) | X-1–X-5, X-8 and early X-9 done (X-4/X-5/X-8 in PM-1); X-6, X-7 and final X-9 later |
+| 0017 | Proposed (partial) | `workload_type` validation (PM-1) and kind dispatch via X-6 (PM-3) done |
+| 0023 | Proposed (partial) | X-1–X-6, X-8 and early X-9 done (X-4/X-5/X-8 in PM-1, X-6 in PM-3); X-7 and final X-9 later |
 | 0015 | **Accepted** at the end of PM-2 (2026-11-06) | — (group commit included) |
-| 0008, 0016 | Proposed | not started |
+| 0016 | Proposed | not started |
 | 0018 | Deferred (Backlog) | not scheduled |
 | 0019, 0020, 0021 | Deferred – Stage 2 | not scheduled |
 ### Configuration

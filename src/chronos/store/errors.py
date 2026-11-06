@@ -106,6 +106,13 @@ class EpochMismatch(StoreError):
     status = 409
 
 
+class Compacted(StoreError):
+    """A watch asked for history the server no longer has (ADR-0008): relist, then
+    watch from the list's revision. Never a partial answer (S6)."""
+
+    status = 410
+
+
 class Unavailable(StoreError):
     """The control plane couldn't be reached (timeout or connection error). Client-side only."""
 
@@ -137,5 +144,5 @@ def from_body(body: ErrorBody) -> StoreError:
 
 
 _MESSAGE_ONLY: dict[str, type[StoreError]] = {
-    cls.__name__: cls for cls in (Invalid, EpochMismatch, Unavailable)
+    cls.__name__: cls for cls in (Invalid, EpochMismatch, Compacted, Unavailable)
 }

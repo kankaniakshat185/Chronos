@@ -13,10 +13,12 @@ level-triggered reconciliation. Workloads are real OS processes.
 > means the workload waits. Every one of those statements is backed by a property-based or
 > real-process test.
 
-**Status: `v0.1-mvp` + PM-1 (self-fencing) + PM-2 (durability).** The core loop works end to
-end; workloads are fenced when their node loses contact with the control plane, so a paused,
-crashed or partitioned node can't cause duplicate replicas; and every acknowledged write is on
-disk before it's acknowledged, so a `chronosd` crash loses nothing. The
+**Status: `v0.1-mvp` + PM-1 (self-fencing) + PM-2 (durability) + PM-3 (watch and
+informers).** The core loop works end to end; workloads are fenced when their node loses
+contact with the control plane, so a paused, crashed or partitioned node can't cause duplicate
+replicas; every acknowledged write is on disk before it's acknowledged, so a `chronosd` crash
+loses nothing; and controllers and agents react to changes through watches instead of polling.
+The
 [limitations](#limitations-what-chronos-does-not-do-yet) are listed below, each with the block
 that fixes it, plus the [design limitations](#design-limitations-deliberate) that stay.
 
@@ -58,7 +60,7 @@ The same scenario runs as an automated test,
 [`test_demo_scenario.py`](tests/integration/test_demo_scenario.py), and unattended against a
 fresh copy of the repo with `scripts/fresh-clone-check.sh`.
 
-## Architecture (as built in `v0.1-mvp`)
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -69,9 +71,13 @@ flowchart LR
         SCH["Scheduler"]
         NLC["Node lifecycle controller<br/>(+ eviction)"]
         API <--> STORE
-        DC <-->|"poll 250 ms / CAS"| STORE
-        SCH <-->|"poll 250 ms / bind"| STORE
-        NLC <-->|"poll 250 ms / CAS"| STORE
+        STORE -->|"watch log"| INF["shared informers<br/>(list + watch caches)"]
+        INF -->|"keys"| DC
+        INF -->|"keys"| SCH
+        INF -->|"keys"| NLC
+        DC -->|"CAS writes"| STORE
+        SCH -->|"bind"| STORE
+        NLC -->|"CAS writes"| STORE
     end
     CLI["chronosctl"] -->|HTTP| API
     subgraph N1["chronos-agent (node)"]
@@ -82,7 +88,7 @@ flowchart LR
         L1 -.->|"read every 100 ms"| S1a
         L1 -.->|"read every 100 ms"| S1b
     end
-    A1 -->|"heartbeat; poll pods?node=self every 500 ms; status"| API
+    A1 -->|"heartbeat; watch pods?node=self; status"| API
 ```
 
 - **One store holds the truth.** Every write bumps a global revision and is a compare-and-swap
@@ -99,8 +105,15 @@ flowchart LR
   sync are pure functions in `src/chronos/core/` with no I/O or clock access; the loops around
   them are thin ([ADR-0006](docs/adr/0006-functional-core-imperative-shell.md)). That is what
   makes the property tests below possible.
-- **Level-triggered.** Every tick recomputes the full diff from authoritative state, so
-  nothing depends on having seen a particular event.
+- **Level-triggered, on watches.** Changes reach controllers through a long-poll watch on the
+  store's revision log; an informer keeps a local cache and turns each change into a *key*
+  on a deduplicating work queue, and `reconcile(key)` recomputes the whole diff for that key.
+  A client that fell too far behind gets `410 Gone` and relists: a watch never silently skips
+  (S6). Caches lag, so the deployment controller tracks **expectations** (it won't create a
+  pod twice before its cache has seen the first) and the scheduler keeps an **assume cache**
+  (its own binds count before the cache shows them)
+  ([ADR-0008](docs/adr/0008-watch-via-long-polling.md),
+  [ADR-0009](docs/adr/0009-level-triggered-reconciliation.md)).
 - **Agents pull.** The control plane never connects to an agent.
 - **Self-fencing.** Every workload runs under a small `chronos-shim` that reads the agent's
   lease file. Once no heartbeat has been accepted for `fence_timeout` F (measured from the
@@ -109,8 +122,8 @@ flowchart LR
   `eviction_timeout` E, and both sides refuse timings unless F + K + drift < E, so old and new
   never overlap ([ADR-0012](docs/adr/0012-agent-self-fencing.md)).
 
-**Remaining MVP shortcut** ([ADR-0022](docs/adr/0022-week-1-mvp-scope.md)): controllers and
-agents poll instead of watching. Its fix (PM-3) is listed under Limitations.
+All of the MVP's shortcuts ([ADR-0022](docs/adr/0022-week-1-mvp-scope.md), now Deprecated)
+have been replaced by the designs they stood in for.
 
 ## What is guaranteed, and how it's tested
 
@@ -129,13 +142,17 @@ agents poll instead of watching. Its fix (PM-3) is listed under Limitations.
 | **S12** no unit of an extended resource is held by two live pods | ✅ | [provider property](tests/property/test_providers_props.py), [integration](tests/integration/test_scheduling.py) |
 | **S8** an acknowledged write survives a control-plane crash; nothing half-written is applied | ✅ | [crash at 7 crash points x 50 seeds, recover, compare with a reference run](tests/durability/test_crash_recovery.py) (`make test-durability`); [recovery from every truncation offset, bit flips, disk full, restart equivalence](tests/property/test_wal_props.py) |
 | **L4** the cluster reconverges after a control-plane restart | ✅ | [back within F: same PIDs; down longer: everything fenced, then the same pods restart on their nodes; crash mid scale-up: exactly 20 pods](tests/integration/test_control_plane_restart.py) |
-| **S6, S7** | ❌ not yet | watch, rollouts: see Limitations |
+| **S6** a watch from revision r delivers every change after r, in order, or fails with `410 Gone`; it never silently skips | ✅ | [replay from every revision of random histories, whole kind, node filter and small batches](tests/property/test_watch_props.py); [both clients, long-poll wake-up, compaction](tests/contract/test_store_client.py); [informer relists after 410 and after a restart](tests/unit/test_runtime.py) |
+| **S7** | ❌ not yet | rollouts: see Limitations |
 
 **Modularity:** a resource that exists only in test code, `example.com/widget`, plus a
 test-only scheduler plugin, pass the scheduling and bind properties with no production-code
 changes ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)); a test-only
 workload type and resource provider run a real process through the unchanged agent runtime
-([`test_seams.py`](tests/integration/test_seams.py)).
+([`test_seams.py`](tests/integration/test_seams.py)); and a kind plus a controller that exist
+only in test code get the HTTP API, watch, store validation, WAL durability, manifest parsing
+and a reconcile loop through the kind and controller registries
+([`test_kind_registry.py`](tests/integration/test_kind_registry.py)).
 
 **How the tests are layered:** unit tests, Hypothesis property and stateful tests (100 examples
 locally, 1 000 in CI, 20 000 with `make test-nightly`), integration tests that run a real
@@ -145,19 +162,19 @@ every crash point and checks what recovery gives back. CI runs everything on Ubu
 ## Limitations: what Chronos does not do yet
 
 > **What this does NOT do yet.** Each item names the planned fix. PM-1 closed the items
-> about fencing, crash backoff and one-phase deletion; PM-2 closed durability.
+> about fencing, crash backoff and one-phase deletion; PM-2 closed durability; PM-3 closed
+> polling.
 
 1. **No chaos testing or deterministic simulation.** Fault testing is limited to scripted integration tests (whole-node kill, agent pause and crash, a cut partition, a whole-node freeze). There are no randomized fault schedules, network partitions, delays or message loss, and no canary bugs proving test strength. → PM-4 (simulator), PM-6 (chaos harness).
 2. **No GPU/CUDA support: planned, Stage 2 (deferred).** Nothing detects or uses GPUs, and no CUDA runs. Stage 1 provides the seams GPU support plugs into: extended resources (X-1/X-2), workload types (X-4) and resource providers (X-5), proven in-process by PX.9 ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)).
-3. **Polling, not watch.** Controllers poll the store every 250 ms and agents poll every 500 ms; this is O(cluster) per tick. It's correct (level-triggered) but not scalable, and not measured beyond 3 nodes. → watch + informers + work queue + expectations, PM-3.
-4. **No resource isolation or enforcement.** CPU, memory and extended-resource requests are used for *placement accounting only*; a process can use more than it requested. → memory-limit enforcement PM-9a (P10.3); CPU stays advisory (ADR-0014).
-5. **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → Backlog (P11.x, ADR-0018); not scheduled.
-6. **No benchmarks.** Timings visible in the demo are a single run on a laptop, not measured distributions. → B1–B6, PM-6.
-7. **No jobs / run-to-completion workloads: planned, Stage 2 (deferred)** (ADR-0020). Only long-running Deployments. The kind registry (X-6, PM-3) makes Jobs purely additive later.
-8. **Scheduling policy is basic.** `LeastAllocated` only. → `MostAllocated`, PM-5. Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
-9. **No auth, TLS or multi-tenancy.** It's built for a trusted localhost. (Non-goal.)
-10. **Extensions are in-process only.** There's no plugin loader; new resources, workload types and providers are registered by in-tree code. (Conscious limit, ADR-0023; a loader may be added at the start of Stage 2 if needed.)
-11. **No metrics or dashboards.** There's no `/metrics` endpoint, Prometheus or Grafana yet; observe the cluster with `chronosctl get`. → PM-5 (P7.4, P7.6, [ADR-0024](docs/adr/0024-prometheus-grafana-observability.md)).
+3. **No resource isolation or enforcement.** CPU, memory and extended-resource requests are used for *placement accounting only*; a process can use more than it requested. → memory-limit enforcement PM-9a (P10.3); CPU stays advisory (ADR-0014).
+4. **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → Backlog (P11.x, ADR-0018); not scheduled.
+5. **No benchmarks.** Timings visible in the demo are a single run on a laptop, not measured distributions. → B1–B6, PM-6.
+6. **No jobs / run-to-completion workloads: planned, Stage 2 (deferred)** (ADR-0020). Only long-running Deployments. The kind and controller registries (X-6, built in PM-3) make Jobs purely additive.
+7. **Scheduling policy is basic.** `LeastAllocated` only. → `MostAllocated`, PM-5. Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
+8. **No auth, TLS or multi-tenancy.** It's built for a trusted localhost. (Non-goal.)
+9. **Extensions are in-process only.** There's no plugin loader; new kinds, controllers, resources, workload types and providers are registered by in-tree code. (Conscious limit, ADR-0023; a loader may be added at the start of Stage 2 if needed.)
+10. **No metrics or dashboards.** There's no `/metrics` endpoint, Prometheus or Grafana yet; observe the cluster with `chronosctl get`. → PM-5 (P7.4, P7.6, [ADR-0024](docs/adr/0024-prometheus-grafana-observability.md)).
 
 ## Design limitations (deliberate)
 
@@ -175,7 +192,7 @@ The block names used above, in build order:
 |-------|--------------|
 | **PM-1** ✅ | Self-fencing (agent + per-pod shim), restart with backoff, orphan cleanup, two-phase deletion, workload-type and resource-provider seams |
 | **PM-2** ✅ | Durability: write-ahead log with CRC framing, snapshots, crash-point-tested recovery |
-| **PM-3** | Watch + informers + work queue + expectations, replacing polling |
+| **PM-3** ✅ | Watch + informers + work queue + expectations + assume cache, replacing polling; kind and controller registries |
 | **PM-4** | Deterministic simulation with canary bugs |
 | **PM-5** | Full CLI, structured logs, events, `/metrics`, Prometheus + Grafana |
 | **PM-6** | Chaos harness (partitions, pauses, delays) and benchmarks |
@@ -188,9 +205,11 @@ The block names used above, in build order:
 src/chronos/
   api/          Pydantic models, the resource map and quantity parsing
   core/         pure logic: schedule, reconcile, node_health, agent_sync
-  store/        versioned store, WAL + snapshots + recovery, validation, heartbeat leases
+  store/        versioned store, WAL + snapshots + recovery, watch log, kind registry,
+                validation, heartbeat leases
   server/       FastAPI app and the chronosd entry point
-  controllers/  deployment, scheduler, node lifecycle (polling loops)
+  controllers/  runtime (informers, work queue, expectations, registry), deployment,
+                scheduler, node lifecycle
   client/       StoreClient protocol, local and HTTP clients
   agent/        chronos-agent, the process runtime, resource providers
   shim/         chronos-shim: per-pod wrapper that enforces fencing

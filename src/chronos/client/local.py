@@ -8,7 +8,8 @@ before it is on disk. So every call, read or write, waits until the store's dura
 revision covers the revision it saw or wrote; the first waiter starts a short timer,
 and one sync then releases everyone who arrived meanwhile. No client and no
 controller ever acts on state that a crash could take back. In "full" mode the
-durable revision always equals the revision, so nothing waits.
+durable revision always equals the revision, so nothing waits. Watches too: an
+event is delivered only once it is durable.
 """
 
 from __future__ import annotations
@@ -19,9 +20,10 @@ import logging
 import os
 from collections.abc import Callable, Mapping
 
-from chronos.api import Deployment, Node, NodeSpec, NodeStatus, ObjectMeta, Pod
+from chronos.api import ApiObject, Node, NodeSpec, NodeStatus, ObjectMeta, Pod
 from chronos.api.resources import format_resources
 from chronos.api.wire import HeartbeatReply, RegisterReply
+from chronos.client.protocol import MAX_WATCH_TIMEOUT, WATCH_TIMEOUT, WatchBatch, WatchEvent
 from chronos.common.clock import Clock, RealClock
 from chronos.common.config import FencingConfig
 from chronos.core.fencing import inequality_violation
@@ -32,6 +34,7 @@ from chronos.store.leases import Leases
 log = logging.getLogger(__name__)
 
 FSYNC_FAILED_EXIT = 70  # a failed group sync: restart and let the log decide (no retry)
+WATCH_BATCH = 500  # events per watch response (ADR-0008)
 
 
 class LocalStoreClient:
@@ -92,10 +95,10 @@ class LocalStoreClient:
         if self._waiters:
             self._flusher = asyncio.create_task(self._flush_soon())
 
-    async def get[T: (Node, Pod, Deployment)](self, kind: type[T], name: str) -> T:
+    async def get[T: ApiObject](self, kind: type[T], name: str) -> T:
         return await self._run(lambda: self.store.get(kind, name))
 
-    async def list[T: (Node, Pod, Deployment)](
+    async def list[T: ApiObject](
         self,
         kind: type[T],
         *,
@@ -104,16 +107,16 @@ class LocalStoreClient:
     ) -> tuple[builtins.list[T], int]:
         return await self._run(lambda: self.store.list(kind, labels=labels, node_name=node_name))
 
-    async def create[T: (Node, Pod, Deployment)](self, obj: T) -> T:
+    async def create[T: ApiObject](self, obj: T) -> T:
         return await self._run(lambda: self.store.create(obj))
 
-    async def update[T: (Node, Pod, Deployment)](self, obj: T) -> T:
+    async def update[T: ApiObject](self, obj: T) -> T:
         return await self._run(lambda: self.store.update(obj))
 
-    async def update_status[T: (Node, Pod, Deployment)](self, obj: T) -> T:
+    async def update_status[T: ApiObject](self, obj: T) -> T:
         return await self._run(lambda: self.store.update_status(obj))
 
-    async def delete[T: (Node, Pod, Deployment)](
+    async def delete[T: ApiObject](
         self, kind: type[T], name: str, expected_rv: int | None = None, *, force: bool = False
     ) -> T:
         gone = await self._run(lambda: self.store.delete(kind, name, expected_rv, force=force))
@@ -123,6 +126,33 @@ class LocalStoreClient:
 
     async def bind(self, pod: str, node: str, expected_rv: int) -> Pod:
         return await self._run(lambda: self.store.bind(pod, node, expected_rv))
+
+    async def watch[T: ApiObject](
+        self,
+        kind: type[T],
+        since: int,
+        *,
+        wait: float = WATCH_TIMEOUT,
+        node_name: str | None = None,
+    ) -> WatchBatch[T]:
+        deadline = self._clock.monotonic() + min(wait, MAX_WATCH_TIMEOUT)
+        while True:
+            events, seen = self.store.watch_since(
+                kind, since, node_name=node_name, limit=WATCH_BATCH
+            )
+            remaining = deadline - self._clock.monotonic()
+            if events or remaining <= 0:
+                await self._durable()  # never deliver an event a crash could take back
+                return WatchBatch([WatchEvent(t, obj) for t, obj in events], seen)
+            # No await between watch_since() above and registering here: a write in
+            # between would otherwise go unnoticed until the timeout.
+            change = self.store.watch.next_append()
+            timer = asyncio.ensure_future(self._clock.sleep(remaining))
+            try:
+                await asyncio.wait({change, timer}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                change.cancel()
+                timer.cancel()
 
     async def register(
         self,

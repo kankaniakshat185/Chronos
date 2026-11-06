@@ -5,6 +5,7 @@ The HTTP client talks to the real FastAPI app in-process through
 mapping are all exercised.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 
 import httpx
@@ -23,7 +24,15 @@ from chronos.client import HttpStoreClient, LocalStoreClient, StoreClient
 from chronos.common.clock import FakeClock
 from chronos.common.config import FencingConfig
 from chronos.server.app import create_app
-from chronos.store import AlreadyExists, Conflict, InsufficientCapacity, Invalid, NotFound, Store
+from chronos.store import (
+    AlreadyExists,
+    Compacted,
+    Conflict,
+    InsufficientCapacity,
+    Invalid,
+    NotFound,
+    Store,
+)
 from chronos.store.errors import EpochMismatch
 from chronos.store.leases import Leases
 
@@ -191,3 +200,73 @@ async def test_register_refuses_unsafe_fencing_timings(client: StoreClient) -> N
         await client.register("n1", "e1", {}, unsafe)
     with pytest.raises(NotFound):
         await client.get(Node, "n1")  # nothing was created
+
+
+# ---- watch (ADR-0008, S6) ----------------------------------------------------------
+
+
+async def test_watch_returns_every_change_after_since_in_order(client: StoreClient) -> None:
+    start = (await client.list(Pod))[1]
+    a = await client.create(pod("a"))
+    a.metadata.labels = {"x": "1"}
+    a = await client.update(a)
+    await client.delete(Pod, "a")
+    batch = await client.watch(Pod, start, wait=0)
+    assert [(e.type, e.object.metadata.name) for e in batch.events] == [
+        ("ADDED", "a"),
+        ("MODIFIED", "a"),
+        ("DELETED", "a"),
+    ]
+    revisions = [e.object.metadata.resource_version for e in batch.events]
+    assert revisions == [start + 1, start + 2, start + 3]
+    assert batch.events[1].object.metadata.labels == {"x": "1"}
+    assert batch.revision == start + 3
+
+
+async def test_watch_is_per_kind_and_still_advances(client: StoreClient) -> None:
+    await client.create(pod("a"))
+    batch = await client.watch(Node, 0, wait=0)
+    assert batch.events == []
+    assert batch.revision == 1  # nothing for nodes, but everything up to 1 was seen
+
+
+async def test_watch_waits_for_the_next_change(client: StoreClient) -> None:
+    watching = asyncio.create_task(client.watch(Pod, 0, wait=5.0))
+    await asyncio.sleep(0.05)  # noqa: TID251 (let it start waiting)
+    assert not watching.done()
+    await client.create(pod("a"))
+    batch = await asyncio.wait_for(watching, 2.0)
+    assert [e.object.metadata.name for e in batch.events] == ["a"]
+
+
+async def test_watch_times_out_empty(client: StoreClient) -> None:
+    await client.create(pod("a"))
+    batch = await client.watch(Pod, 1, wait=0.05)
+    assert (batch.events, batch.revision) == ([], 1)
+
+
+async def test_node_filter_sees_its_pods_arrive_and_leave(
+    client: StoreClient, local: LocalStoreClient
+) -> None:
+    await ready_node(client, local, "n1")
+    await ready_node(client, local, "n2")
+    start = (await client.list(Pod))[1]
+    for name, node in (("a", "n1"), ("b", "n2")):
+        created = await client.create(pod(name))
+        await client.bind(name, node, created.metadata.resource_version)
+    await client.delete(Pod, "a", force=True)
+    batch = await client.watch(Pod, start, wait=0, node_name="n1")
+    assert [(e.type, e.object.metadata.name) for e in batch.events] == [
+        ("MODIFIED", "a"),  # the bind: unbound before, on n1 after
+        ("DELETED", "a"),
+    ]
+
+
+async def test_watch_from_lost_history_is_compacted(
+    client: StoreClient, local: LocalStoreClient
+) -> None:
+    await client.create(pod("a"))
+    local.store.watch.reset(local.store.revision)  # what a restart does to the history
+    with pytest.raises(Compacted):
+        await client.watch(Pod, 0, wait=0)
+    assert (await client.watch(Pod, 1, wait=0)).events == []  # from the list's revision: fine

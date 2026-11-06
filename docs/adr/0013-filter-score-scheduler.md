@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P3 | — | — |
+| Accepted | 2026-11-06 | P3 | — | — |
 
 > **Amended 2026-11-04 (still Proposed, so amended in place):** generalized for the Stage 1 extension seams, [ADR-0023](0023-extension-seams.md) X-1/X-2/X-3: fit and bind iterate over resource names, and plugins register by name.
 
@@ -95,6 +95,9 @@ def bind(pod_name, node_name, expected_rv):
 - **Node becomes NotReady after assume, before bind:** the store's Ready check rejects → requeue.
 - **Pod deleted while pending:** bind → NotFound → drop.
 - **Scheduler restart:** the assume cache is empty, the informer relists, and pending pods are re-enqueued. Nothing is lost.
+
+### Implementation status (2026-11-06)
+Implemented: plugins, registry, `pick_node` and the store-side capacity re-check since the MVP; the scheduler moved onto shared informers with the **assume cache** in PM-3 (`controllers/scheduler.py`). Allocation is summed from the pod cache by a handler (bound, unfinished pods), not read from `node.status.allocated` (a read-time view the watch doesn't carry); an assumption adds a pod's requests to its node until the pod cache shows the pod bound, the bind fails, the pod goes away, or `assume_ttl` (30 s) passes. Pending pods are queued oldest first; any node event, or a pod that frees capacity, queues every pending pod again. Verification: a stale-cache unit test (two 1-cpu nodes, two 1-cpu pods, no watch between binds: both bind, to different nodes; without the assumption the second bind fails), the scheduler properties run on the new shell, and mutation checks of the assume cache and both requeue triggers. Still to come: `MostAllocated` (PM-5).
 
 ## 5. Consequences
 **Positive:** S2 is enforced in two places; deterministic placements; extensible; maps onto the kube-scheduler framework.

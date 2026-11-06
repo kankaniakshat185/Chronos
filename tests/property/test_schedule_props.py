@@ -77,7 +77,7 @@ def build(cluster: Cluster, profile: Profile = PROFILE) -> tuple[Store, Schedule
             {"command": ["true"], "resources": {"requests": format_resources(req)}}
         )
         store.create(Pod(metadata=ObjectMeta(name=f"p{i:02d}"), spec=spec))
-    controller = SchedulerController(LocalStoreClient(store, Leases(clock)), clock, profile, 0.25)
+    controller = SchedulerController(LocalStoreClient(store, Leases(clock)), clock, profile)
     return store, controller
 
 
@@ -92,7 +92,7 @@ def within_capacity(used: Mapping[str, int], cap: Mapping[str, int]) -> bool:
 @given(clusters())
 def test_no_node_is_ever_overcommitted(cluster: Cluster) -> None:  # S2, S11
     store, controller = build(cluster)
-    asyncio.run(controller.tick())
+    asyncio.run(controller.run_once())
     for node in store.list(Node)[0]:
         assert within_capacity(store.allocated(node.metadata.name), node.spec.capacity)
 
@@ -100,7 +100,7 @@ def test_no_node_is_ever_overcommitted(cluster: Cluster) -> None:  # S2, S11
 @given(clusters())
 def test_extended_resources_are_a_hard_constraint(cluster: Cluster) -> None:  # S11
     store, controller = build(cluster)
-    asyncio.run(controller.tick())
+    asyncio.run(controller.run_once())
     nodes = {n.metadata.name: n for n in store.list(Node)[0]}
     for pod in store.list(Pod)[0]:
         wants = {r: n for r, n in pod.requests.items() if is_extended(r) and n > 0}
@@ -114,7 +114,7 @@ def test_whatever_stays_pending_fits_nowhere(cluster: Cluster) -> None:
     """Work-conserving: after a tick, every pending pod is Unschedulable with a reason,
     and really has no feasible node (capacity only shrinks during a tick)."""
     store, controller = build(cluster)
-    asyncio.run(controller.tick())
+    asyncio.run(controller.run_once())
     infos = [NodeInfo.of(n) for n in store.list(Node)[0]]
     for pod in store.list(Pod, node_name="")[0]:
         assert isinstance(pick_node(pod, infos, PROFILE), Unschedulable)
@@ -126,8 +126,8 @@ def test_whatever_stays_pending_fits_nowhere(cluster: Cluster) -> None:
 def test_placement_is_deterministic(cluster: Cluster) -> None:
     first, c1 = build(cluster)
     second, c2 = build(cluster)
-    asyncio.run(c1.tick())
-    asyncio.run(c2.tick())
+    asyncio.run(c1.run_once())
+    asyncio.run(c2.run_once())
     assert placement(first) == placement(second)
 
 
@@ -139,7 +139,7 @@ def test_a_single_pod_that_fits_somewhere_is_placed(cluster: Cluster) -> None:  
         return
     infos = [NodeInfo.of(n) for n in store.list(Node)[0]]
     fits_somewhere = not isinstance(pick_node(pods[0], infos, PROFILE), Unschedulable)
-    asyncio.run(controller.tick())
+    asyncio.run(controller.run_once())
     assert bool(store.get(Pod, pods[0].metadata.name).spec.node_name) == fits_somewhere
 
 
@@ -148,10 +148,10 @@ def test_ticks_reach_a_fixed_point(cluster: Cluster) -> None:
     """No write churn: a pending pod's message is rewritten only when its reasons change
     (e.g. because another pod was bound in the same tick), so ticks settle quickly."""
     store, controller = build(cluster)
-    asyncio.run(controller.tick())
+    asyncio.run(controller.run_once())
     placed = placement(store)
-    asyncio.run(controller.tick())
+    asyncio.run(controller.run_once())
     assert placement(store) == placed  # nothing new becomes placeable without a change
     rev = store.revision
-    asyncio.run(controller.tick())
+    asyncio.run(controller.run_once())
     assert store.revision == rev

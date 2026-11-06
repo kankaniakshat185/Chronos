@@ -69,7 +69,7 @@ def parts(clock: FakeClock) -> tuple[Agent, FakeClient, FakeRuntime]:
     client, runtime = FakeClient(clock), FakeRuntime()
     agent = Agent(
         name="n1", capacity={}, client=client, runtime=runtime,  # type: ignore[arg-type]
-        clock=clock, fencing=FENCING, poll_interval=0.5,
+        clock=clock, fencing=FENCING,
     )  # fmt: skip
     return agent, client, runtime
 
@@ -117,6 +117,7 @@ async def test_fenced_agent_starts_and_reports_nothing(
     client.pods = [
         Pod(metadata=ObjectMeta(name="p", uid="u9"), spec=PodSpec(command=["x"], node_name="n1"))
     ]
+    await agent.pods.relist()
     clock.advance(7.0)
     await agent.sync_once()  # checks the fence before acting
     assert agent.fenced and runtime.started == []

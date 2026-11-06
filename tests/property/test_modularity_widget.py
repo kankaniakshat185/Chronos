@@ -44,7 +44,7 @@ def test_widgets_schedule_and_bind_like_any_extended_resource(
     cluster: tuple[list[tuple[dict[str, int], NodeCondition, bool]], list[dict[str, int]]],
 ) -> None:
     store, controller = build(cluster, PROFILE)
-    asyncio.run(controller.tick())
+    asyncio.run(controller.run_once())
     nodes = {n.metadata.name: n for n in store.list(Node)[0]}
     for name, node in nodes.items():
         assert within_capacity(store.allocated(name), node.spec.capacity)
@@ -63,7 +63,7 @@ def test_the_test_plugin_changes_placement() -> None:
     )
     default, c1 = build(cluster)
     plugged, c2 = build(cluster, PROFILE)
-    asyncio.run(c1.tick())
-    asyncio.run(c2.tick())
+    asyncio.run(c1.run_once())
+    asyncio.run(c2.run_once())
     assert default.get(Pod, "p00").spec.node_name == "n0"  # name tie-break
     assert plugged.get(Pod, "p00").spec.node_name == "n1"  # fewest widgets left

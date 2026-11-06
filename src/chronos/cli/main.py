@@ -11,14 +11,14 @@ from typing import Annotated
 import typer
 
 from chronos import __version__
-from chronos.api import Deployment, Node, Pod
-from chronos.api.kinds import Obj
+from chronos.api import ApiObject, Deployment, Node, Pod
 from chronos.cli import render
 from chronos.cli.manifest import ManifestError, load
 from chronos.client.http import HttpStoreClient
 from chronos.common.clock import Clock, RealClock
 from chronos.store import AlreadyExists, Conflict, StoreError
 from chronos.store.errors import Unavailable
+from chronos.store.kinds import lookup
 
 app = typer.Typer(
     help="chronosctl: the command-line client.", no_args_is_help=True, add_completion=False
@@ -35,13 +35,6 @@ class Kind(StrEnum):
     NODES = "nodes"
     PODS = "pods"
     DEPLOYMENTS = "deployments"
-
-
-ALIASES: dict[str, type[Obj]] = {
-    **dict.fromkeys(("node", "nodes", "no"), Node),
-    **dict.fromkeys(("pod", "pods", "po"), Pod),
-    **dict.fromkeys(("deployment", "deployments", "deploy"), Deployment),
-}
 
 
 class Output(StrEnum):
@@ -76,14 +69,14 @@ def _run[T](ctx: typer.Context, work: Callable[[HttpStoreClient], Awaitable[T]])
     raise typer.Exit(code=1)
 
 
-def _kind(name: str) -> type[Obj]:
-    if name.lower() not in ALIASES:
+def _kind(name: str) -> type[ApiObject]:
+    if (found := lookup(name)) is None:
         typer.echo(f"error: unknown kind {name!r} (nodes, pods, deployments)", err=True)
         raise typer.Exit(code=2)
-    return ALIASES[name.lower()]
+    return found.model
 
 
-async def _apply_one[T: (Node, Pod, Deployment)](client: HttpStoreClient, obj: T) -> str:
+async def _apply_one(client: HttpStoreClient, obj: ApiObject) -> str:
     ref = f"{obj.kind.lower()}/{obj.metadata.name}"
     try:
         await client.create(obj)
@@ -112,13 +105,7 @@ def apply(
 
     async def work(client: HttpStoreClient) -> None:
         for obj in load(filename):
-            match obj:  # one branch per kind keeps the client calls precisely typed
-                case Node():
-                    typer.echo(await _apply_one(client, obj))
-                case Pod():
-                    typer.echo(await _apply_one(client, obj))
-                case Deployment():
-                    typer.echo(await _apply_one(client, obj))
+            typer.echo(await _apply_one(client, obj))
 
     _run(ctx, work)
 
@@ -177,12 +164,7 @@ def delete(ctx: typer.Context, kind: str, name: str) -> None:
     model = _kind(kind)
 
     async def work(client: HttpStoreClient) -> None:
-        if model is Node:
-            await client.delete(Node, name)
-        elif model is Pod:
-            await client.delete(Pod, name)
-        else:
-            await client.delete(Deployment, name)
+        await client.delete(model, name)
         typer.echo(f"{model.__name__.lower()}/{name} deleted")
 
     _run(ctx, work)

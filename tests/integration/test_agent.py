@@ -48,6 +48,17 @@ async def run_pod(
     return pod
 
 
+async def initialized(cluster: Cluster, pod: Pod) -> None:
+    """Running means the process started, not that the workload has set itself up.
+    Its first line is printed after it installs its signal handlers."""
+    log = cluster.agent_dir(pod.spec.node_name) / "pods" / pod.metadata.uid / "stdout.log"
+
+    async def printed() -> bool:
+        return log.exists() and log.read_text() != ""
+
+    await eventually(printed)
+
+
 async def test_three_agents_register_and_become_ready(
     cluster: Cluster, api: HttpStoreClient
 ) -> None:
@@ -102,6 +113,7 @@ async def test_sigterm_ignoring_workload_is_killed_after_grace(
     cluster.start_agent("a")
     await ready_nodes(api, "a")
     pod = await run_pod(api, "stubborn", "a", workload("--ignore-sigterm"))
+    await initialized(cluster, pod)
     pid = pod.status.pid
     assert pid is not None
     await api.delete(Pod, "stubborn")
@@ -215,6 +227,7 @@ async def test_two_phase_deletion_keeps_the_pod_until_its_process_is_gone(
     cluster.start_agent("a")
     await ready_nodes(api, "a")
     pod = await run_pod(api, "stubborn", "a", workload("--ignore-sigterm"))
+    await initialized(cluster, pod)
     pgid = pod.status.pid
     assert pgid is not None
 

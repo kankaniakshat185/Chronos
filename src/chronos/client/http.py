@@ -13,8 +13,7 @@ from collections.abc import Mapping
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from chronos.api import Deployment, Node, Pod
-from chronos.api.kinds import PLURALS
+from chronos.api import ApiObject, Pod
 from chronos.api.resources import format_resources
 from chronos.api.wire import (
     BindingRequest,
@@ -24,8 +23,10 @@ from chronos.api.wire import (
     RegisterReply,
     RegisterRequest,
 )
+from chronos.client.protocol import MAX_WATCH_TIMEOUT, WATCH_TIMEOUT, WatchBatch, WatchEvent
 from chronos.common.config import FencingConfig
 from chronos.store.errors import StoreError, Unavailable, from_body
+from chronos.store.kinds import info
 
 PREFIX = "/api/v1"
 
@@ -79,11 +80,11 @@ class HttpStoreClient:
         except ValidationError:
             raise StoreError(f"{method} {path}: HTTP {response.status_code}") from None
 
-    async def get[T: (Node, Pod, Deployment)](self, kind: type[T], name: str) -> T:
-        response = await self._request("GET", f"/{PLURALS[kind]}/{name}")
+    async def get[T: ApiObject](self, kind: type[T], name: str) -> T:
+        response = await self._request("GET", f"/{info(kind).plural}/{name}")
         return kind.model_validate_json(response.content)
 
-    async def list[T: (Node, Pod, Deployment)](
+    async def list[T: ApiObject](
         self,
         kind: type[T],
         *,
@@ -95,36 +96,56 @@ class HttpStoreClient:
             params["labels"] = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
         if node_name is not None:
             params["node"] = node_name
-        data = (await self._request("GET", f"/{PLURALS[kind]}", params=params)).json()
+        data = (await self._request("GET", f"/{info(kind).plural}", params=params)).json()
         return [kind.model_validate(item) for item in data["items"]], int(data["revision"])
 
-    async def create[T: (Node, Pod, Deployment)](self, obj: T) -> T:
-        response = await self._request("POST", f"/{PLURALS[type(obj)]}", body=obj)
+    async def create[T: ApiObject](self, obj: T) -> T:
+        response = await self._request("POST", f"/{info(type(obj)).plural}", body=obj)
         return type(obj).model_validate_json(response.content)
 
-    async def update[T: (Node, Pod, Deployment)](self, obj: T) -> T:
-        path = f"/{PLURALS[type(obj)]}/{obj.metadata.name}"
+    async def update[T: ApiObject](self, obj: T) -> T:
+        path = f"/{info(type(obj)).plural}/{obj.metadata.name}"
         response = await self._request("PUT", path, body=obj)
         return type(obj).model_validate_json(response.content)
 
-    async def update_status[T: (Node, Pod, Deployment)](self, obj: T) -> T:
-        path = f"/{PLURALS[type(obj)]}/{obj.metadata.name}/status"
+    async def update_status[T: ApiObject](self, obj: T) -> T:
+        path = f"/{info(type(obj)).plural}/{obj.metadata.name}/status"
         response = await self._request("PUT", path, body=obj)
         return type(obj).model_validate_json(response.content)
 
-    async def delete[T: (Node, Pod, Deployment)](
+    async def delete[T: ApiObject](
         self, kind: type[T], name: str, expected_rv: int | None = None, *, force: bool = False
     ) -> T:
         params: dict[str, str | int] = {"force": "true"} if force else {}
         if expected_rv is not None:
             params["resource_version"] = expected_rv
-        response = await self._request("DELETE", f"/{PLURALS[kind]}/{name}", params=params)
+        response = await self._request("DELETE", f"/{info(kind).plural}/{name}", params=params)
         return kind.model_validate_json(response.content)
 
     async def bind(self, pod: str, node: str, expected_rv: int) -> Pod:
         body = BindingRequest(node_name=node, resource_version=expected_rv)
         response = await self._request("POST", f"/pods/{pod}/binding", body=body)
         return Pod.model_validate_json(response.content)
+
+    async def watch[T: ApiObject](
+        self,
+        kind: type[T],
+        since: int,
+        *,
+        wait: float = WATCH_TIMEOUT,
+        node_name: str | None = None,
+    ) -> WatchBatch[T]:
+        wait = min(wait, MAX_WATCH_TIMEOUT)
+        params: dict[str, str | int] = {"since": since, "timeout": repr(wait)}
+        if node_name is not None:
+            params["node"] = node_name
+        # The server may hold the request for `wait`: allow for that, plus slack.
+        response = await self._request(
+            "GET", f"/watch/{info(kind).plural}", params=params, time_limit=wait + 5.0
+        )
+        data = response.json()
+        events = [WatchEvent(e["type"], kind.model_validate(e["object"])) for e in data["events"]]
+        return WatchBatch(events, int(data["revision"]))
 
     async def register(
         self,

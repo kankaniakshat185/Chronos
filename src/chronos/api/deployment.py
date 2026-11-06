@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from chronos.api.meta import ObjectMeta
+from chronos.api.meta import ApiObject, ObjectMeta
 from chronos.api.pod import PodTemplate
 
 
@@ -25,9 +25,7 @@ class DeploymentStatus(BaseModel):
     ready_replicas: int = 0
 
 
-class Deployment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class Deployment(ApiObject):
     kind: Literal["Deployment"] = "Deployment"
     metadata: ObjectMeta
     spec: DeploymentSpec

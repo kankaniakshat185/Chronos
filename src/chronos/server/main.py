@@ -1,7 +1,10 @@
 """`chronosd` entry point: the API server, the in-memory store and its controllers."""
 
+import asyncio
+import contextlib
 import logging
 from pathlib import Path
+from types import FrameType
 from typing import Annotated
 
 import typer
@@ -9,14 +12,12 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import ValidationError
 
+import chronos.controllers  # noqa: F401 (registers the built-in controllers)
 from chronos import __version__
 from chronos.client.local import LocalStoreClient
 from chronos.common.clock import RealClock
 from chronos.common.config import Timings
-from chronos.controllers.deployment import DeploymentController
-from chronos.controllers.node_lifecycle import NodeLifecycleController
-from chronos.controllers.scheduler import SchedulerController
-from chronos.core.schedule import SchedulerConfig, resolve
+from chronos.controllers.runtime import ControllerContext, Informers, start_all
 from chronos.server.app import create_app
 from chronos.store import Store
 from chronos.store.leases import Leases
@@ -29,6 +30,24 @@ app = typer.Typer(
 )
 
 
+class _Server(uvicorn.Server):
+    """Ends open HTTP watches as soon as a shutdown signal arrives, instead of letting
+    the graceful-shutdown timeout cancel them mid-request."""
+
+    def __init__(self, config: uvicorn.Config, app: FastAPI) -> None:
+        super().__init__(config)
+        self._app = app
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        super().handle_exit(sig, frame)
+        # This runs inside a signal handler: hand the work to the event loop. No loop
+        # running yet means no watches either.
+        closing = getattr(self._app.state, "closing", None)
+        with contextlib.suppress(RuntimeError):
+            if closing is not None:
+                asyncio.get_running_loop().call_soon_threadsafe(closing.set)
+
+
 def build(timings: Timings, store: Store, group_window: float = 0.002) -> FastAPI:
     clock = RealClock()
     # Leases start empty at boot, so every node gets a full grace period after a restart
@@ -36,12 +55,9 @@ def build(timings: Timings, store: Store, group_window: float = 0.002) -> FastAP
     client = LocalStoreClient(
         store, Leases(clock), timings.eviction_timeout, clock=clock, group_window=group_window
     )
-    lifecycle = NodeLifecycleController(client, clock, timings)
-    scheduler = SchedulerController(
-        client, clock, resolve(SchedulerConfig()), timings.scheduler_tick
-    )
-    deployments = DeploymentController(client, clock, timings.deployment_tick)
-    return create_app(client, loops=[lifecycle.run, scheduler.run, deployments.run])
+    # Every registered controller (X-6), on one shared set of informers.
+    ctx = ControllerContext(client, Informers(client, clock), clock, timings)
+    return create_app(client, loops=start_all(ctx))
 
 
 def _open_store(data_dir: Path, sync: SyncMode, snapshot_every: int) -> Store:
@@ -93,7 +109,12 @@ def run(
     store = _open_store(data_dir or Path.home() / ".chronos" / "server", mode, snapshot_every)
     try:
         app_ = build(timings, store, group_window / 1000)
-        uvicorn.run(app_, host=host, port=port, log_level="warning")
+        # Open watches are answered at once on shutdown (_Server); anything else
+        # still running after 1 s is cut: clients retry.
+        config = uvicorn.Config(
+            app_, host=host, port=port, log_level="warning", timeout_graceful_shutdown=1
+        )
+        _Server(config, app_).run()
     finally:
         store.close()
 

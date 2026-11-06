@@ -19,7 +19,7 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from pathlib import Path
 
@@ -55,6 +55,9 @@ class ProcessRuntime:
         self._fencing = fencing
         self._grace = fencing.termination_grace
         self.eviction_timeout: float | None = None  # from the server, set at registration
+        # Called when a local process starts or exits: what the node should report
+        # changed, with no store event to say so (the agent's sync listens).
+        self.on_change: Callable[[], None] | None = None
         self.lease = data_dir / "lease"
         self._procs: dict[str, LocalProc] = {}
         self._handles: dict[str, asyncio.subprocess.Process] = {}
@@ -136,6 +139,7 @@ class ProcessRuntime:
             self._procs[uid] = LocalProc(
                 uid, name, 0, EXIT_NOT_STARTABLE, now, now, restarts, crashes
             )
+            self._changed()
             return
         self._pidfile(uid).write_text(str(proc.pid))
         self._handles[uid] = proc
@@ -145,6 +149,7 @@ class ProcessRuntime:
         )  # fmt: skip
         self._spawn(self._wait(uid, proc))
         log.info("pod %s: started pid %d", name, proc.pid)
+        self._changed()
 
     def stop(self, uid: str, *, fenced: bool = False) -> None:
         """SIGTERM the group, SIGKILL it after the grace period. Returns at once.
@@ -190,6 +195,11 @@ class ProcessRuntime:
         if current is not None and current.pid == proc.pid:  # not already restarted
             self._procs[uid] = replace(current, exit_code=code, exited_at=self._clock.monotonic())
         log.info("pod %s: pid %d exited with %d", uid, proc.pid, code)
+        self._changed()
+
+    def _changed(self) -> None:
+        if self.on_change is not None:
+            self.on_change()
 
     def _pidfile(self, uid: str) -> Path:
         return self._dir / "pids" / uid

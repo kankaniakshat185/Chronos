@@ -8,17 +8,34 @@ Errors are the store's own exceptions (`chronos.store.errors`) on both sides.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Protocol
 
-from chronos.api import Deployment, Node, Pod
+from chronos.api import ApiObject, Pod
 from chronos.api.wire import HeartbeatReply, RegisterReply
 from chronos.common.config import FencingConfig
+from chronos.store.watchlog import EventType
+
+WATCH_TIMEOUT = 30.0  # seconds a watch waits for an event (ADR-0008)
+MAX_WATCH_TIMEOUT = 60.0
+
+
+@dataclass(frozen=True)
+class WatchEvent[T: ApiObject]:
+    type: EventType
+    object: T  # for DELETED: the last state, resource_version = the deletion's revision
+
+
+@dataclass(frozen=True)
+class WatchBatch[T: ApiObject]:
+    events: list[WatchEvent[T]]
+    revision: int  # everything up to here was seen: watch again from it
 
 
 class StoreClient(Protocol):
-    async def get[T: (Node, Pod, Deployment)](self, kind: type[T], name: str) -> T: ...
+    async def get[T: ApiObject](self, kind: type[T], name: str) -> T: ...
 
-    async def list[T: (Node, Pod, Deployment)](
+    async def list[T: ApiObject](
         self,
         kind: type[T],
         *,
@@ -26,19 +43,32 @@ class StoreClient(Protocol):
         node_name: str | None = None,
     ) -> tuple[list[T], int]: ...
 
-    async def create[T: (Node, Pod, Deployment)](self, obj: T) -> T: ...
+    async def create[T: ApiObject](self, obj: T) -> T: ...
 
-    async def update[T: (Node, Pod, Deployment)](self, obj: T) -> T: ...
+    async def update[T: ApiObject](self, obj: T) -> T: ...
 
-    async def update_status[T: (Node, Pod, Deployment)](self, obj: T) -> T: ...
+    async def update_status[T: ApiObject](self, obj: T) -> T: ...
 
-    async def delete[T: (Node, Pod, Deployment)](
+    async def delete[T: ApiObject](
         self, kind: type[T], name: str, expected_rv: int | None = None, *, force: bool = False
     ) -> T:
         """Bound, unfinished pods are only marked terminating unless `force` (P4.7)."""
         ...
 
     async def bind(self, pod: str, node: str, expected_rv: int) -> Pod: ...
+
+    async def watch[T: ApiObject](
+        self,
+        kind: type[T],
+        since: int,
+        *,
+        wait: float = WATCH_TIMEOUT,
+        node_name: str | None = None,
+    ) -> WatchBatch[T]:
+        """Changes to `kind` after revision `since`, waiting up to `wait` seconds for one
+        (ADR-0008). An empty batch still advances `revision`. Raises Compacted if that
+        history is gone: list again and watch from the list's revision (S6)."""
+        ...
 
     async def register(
         self,
