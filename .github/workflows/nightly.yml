@@ -1,0 +1,36 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  # 10 000 seeds, in 10 shards of 1 000; canaries with their full budgets.
+  sim:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SIM_SEEDS: "1000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: SIM_FIRST_SEED=$(( ${{ matrix.shard }} * 1000 )) uv run pytest -n auto -q --timeout=0 tests/sim/test_sim.py
+
+  properties:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: make test-nightly

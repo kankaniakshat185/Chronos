@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Callable
 
 from chronos.api import Deployment, Pod
 from chronos.client.local import LocalStoreClient
@@ -59,9 +60,11 @@ class DeploymentController(Controller):
         *,
         resync_period: float = 30.0,
         expectations_ttl: float = 30.0,
+        new_name: Callable[[str], str] = pod_name,
     ) -> None:
         informers = informers or Informers(client, clock)
         self._client = client
+        self._new_name = new_name
         self._deployments = informers.get(Deployment)
         self._pods = informers.get(Pod)
         self._deployments.add_index(UID, lambda d: d.metadata.uid)
@@ -124,7 +127,7 @@ class DeploymentController(Controller):
             case CreatePod(count=count):
                 for _ in range(count):
                     try:
-                        created = await self._client.create(pod_for(dep, pod_name(name)))
+                        created = await self._client.create(pod_for(dep, self._new_name(name)))
                     except StoreError:
                         self.expectations.created(uid)  # it will never be observed
                         raise

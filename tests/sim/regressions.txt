@@ -1,0 +1,5 @@
+# Seeds that once failed, replayed on every run forever (P5.7). One per line:
+#   <seed> [canary]   # what it found, and where it's written up
+9    # S3: after a whole-node freeze the agent re-registered (fresh lease) before the shim's next poll; the replaced workload ran ~K alongside its replacement. Fixed: the agent SIGKILLs past-E workloads before renewing the lease (devlog 2026-11-06, PM-4)
+24   # S3: same bug as seed 9, reached through a different schedule
+25   # S3: a paused agent re-registered and restarted evicted pods from its stale pod cache. Fixed: after registering, the agent acts only on a fresh list (devlog 2026-11-06, PM-4)

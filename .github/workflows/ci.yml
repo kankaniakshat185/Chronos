@@ -33,3 +33,16 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run pytest
+
+  # Deterministic simulation (ADR-0016): 200 seeds + regressions + every canary, per PR.
+  sim:
+    runs-on: ubuntu-latest
+    env:
+      SIM_SEEDS: "200"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest -n auto -q tests/sim

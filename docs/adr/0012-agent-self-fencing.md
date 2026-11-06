@@ -108,6 +108,9 @@ Replacements are created only after eviction, so old and new instances never ove
 ### Implementation status (2026-11-05)
 Implemented as described: `core/fencing.py`, `shim/__main__.py` (run as `python -m chronos.shim`), the agent's heartbeat, fence-watch and sync loops, and registration-time validation of F + K + drift < E (the server returns E, which the shims use). Deviations: the fence watch is its own loop (the heartbeat loop can sit in a register retry while the server is down); a stop caused by fencing is recorded as `FENCED_EXIT_CODE` (86) so the pod is restarted, not failed, after the agent leaves Fenced mode; when the lease is past E the shim SIGKILLs its whole process group, itself included. Integration tests cover agent pause, agent `kill -9`, a cut partition (a minimal TCP proxy; the full fault proxy is PM-6), a whole-node freeze (about 65 ms window measured) and a short pause that must not fence. Still to come: the sim and chaos canaries (PM-4, PM-6) and the control-plane outage path (U2.2, PM-2).
 
+### Amendment (2026-11-06, found by the simulator, ADR-0016)
+The agent applies the shim's second rule too: if its lease is older than `eviction_timeout`, it SIGKILLs every workload at once (no grace), in every fence check and **before writing any new lease**. Without this, after a whole-node freeze the agent's re-register could renew the lease before the shim's next poll, and the shim would then let a workload whose replacement already runs live for up to K. That broke the "at most one shim poll" bound. Also: after any registration, the agent acts only once its pod cache has reached the registration's store revision, so it never restarts pods the server evicted while it was away.
+
 ## 5. Consequences
 **Positive:** a precise, provable safety property (S3, S4) that holds even when the agent dies; a strong interview topic (leases, send-time rule, clock assumptions, shims, fencing tokens).
 **Negative / accepted costs:**

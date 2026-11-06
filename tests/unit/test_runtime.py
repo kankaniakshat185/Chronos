@@ -7,6 +7,7 @@ import pytest
 
 from chronos.api import ObjectMeta, Pod, PodSpec
 from chronos.client import LocalStoreClient
+from chronos.client.protocol import WatchBatch, WatchEvent
 from chronos.common.clock import FakeClock
 from chronos.controllers.runtime import Expectations, Informer, Signal, WorkQueue
 from chronos.store import Store
@@ -45,6 +46,18 @@ async def test_a_key_is_handed_out_once_and_requeued_if_added_meanwhile() -> Non
     assert len(q) == 0
 
 
+async def test_get_sleeps_until_a_delayed_key_is_due() -> None:
+    clock = FakeClock()
+    q = WorkQueue(clock)
+    q.add_after("a", 1.0)
+    getting = asyncio.create_task(q.get())
+    await settle()
+    assert not getting.done()
+    clock.advance(1.0)
+    await settle()
+    assert getting.done() and getting.result() == "a"
+
+
 async def test_get_waits_for_an_add() -> None:
     q = WorkQueue(FakeClock())
     getting = asyncio.create_task(q.get())
@@ -62,7 +75,7 @@ async def test_failures_back_off_per_key_and_forget_resets() -> None:
         q.add_rate_limited("a")
         await settle()
         waited = 0.0
-        while not len(q):
+        while not q.ready():
             clock.advance(0.0625)
             waited += 0.0625
             await settle()
@@ -81,10 +94,10 @@ async def test_add_after() -> None:
     await settle()
     clock.advance(0.9)
     await settle()
-    assert len(q) == 0
+    assert not q.ready()
     clock.advance(0.1)
     await settle()
-    assert len(q) == 1
+    assert q.ready()
 
 
 async def test_signal_is_not_lost_when_nobody_waits_yet() -> None:
@@ -235,3 +248,54 @@ async def test_after_a_restart_informers_relist(tmp_path: Path) -> None:
     assert informer.needs_relist
     await informer.step()
     assert [p.metadata.name for p in informer.list()] == ["a", "b", "c"]
+
+
+class Crossing:
+    """A client whose watch replies only when the test says so."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.listing: tuple[list[Pod], int] = ([], 0)
+        self.batch: WatchBatch[Pod] = WatchBatch([], 0)
+
+    async def list(self, kind: type, **_: object) -> tuple[list[Pod], int]:
+        return self.listing
+
+    async def watch(self, kind: type, since: int, **_: object) -> WatchBatch[Pod]:
+        await self.release.wait()
+        return self.batch
+
+
+def at(name: str, rv: int) -> Pod:
+    p = pod(name)
+    p.metadata.resource_version = rv
+    return p
+
+
+async def test_a_watch_in_flight_across_a_relist_is_dropped() -> None:
+    """Simulator finding (seed 21): replies crossed, and an older list wiped a pod the
+    watch had delivered. A batch applies only to the cache it was asked against."""
+    client = Crossing()
+    informer = Informer(client, Pod, FakeClock())  # type: ignore[arg-type]
+    client.listing = ([at("a", 1)], 1)
+    await informer.relist()
+    watching = asyncio.create_task(informer.watch_once())
+    await asyncio.sleep(0)  # noqa: TID251 (the watch is now in flight)
+    client.listing = ([at("b", 5)], 5)
+    await informer.relist()  # newer: "a" was deleted at revision 4
+    client.batch = WatchBatch([WatchEvent("MODIFIED", at("a", 2))], 2)  # about the old cache
+    client.release.set()
+    await watching
+    assert [p.metadata.name for p in informer.list()] == ["b"]  # "a" isn't resurrected
+    assert informer.revision == 5
+
+
+async def test_a_list_older_than_the_cache_is_ignored() -> None:
+    client = Crossing()
+    informer = Informer(client, Pod, FakeClock())  # type: ignore[arg-type]
+    client.listing = ([at("a", 1), at("b", 5)], 5)
+    await informer.relist()
+    client.listing = ([at("a", 1)], 2)  # a slow reply from before "b"
+    await informer.relist()
+    assert [p.metadata.name for p in informer.list()] == ["a", "b"]
+    assert informer.revision == 5

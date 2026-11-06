@@ -2,7 +2,7 @@
 
 Chronos makes strong claims: "never more than R replicas", "an acknowledged write survives a crash", "a pod never lands on a node without enough slots". Each claim is backed by tests. But a passing test only proves something if it *would fail* when the claim breaks. This log records how that was checked: by deliberately breaking the code that upholds each claim and confirming that a test notices.
 
-It covers the MVP through PM-3 (40 entries so far), and gets a new entry every time a guarantee is added.
+It covers the MVP through PM-4 (44 hand-made mutations plus the simulator's 10 canaries so far), and gets a new entry every time a guarantee is added.
 
 ---
 
@@ -111,7 +111,35 @@ For this block the mutations were run by a small script (kept outside the repo) 
 | 39 | A new node reaches waiting pods | node events don't requeue pending pods | integration suite | ⚠️ caught, but **only by the end-to-end demo test**; a focused unit test was added and catches it alone |
 | 40 | Never evict from a node that came back | evict on the cached NotReady, no live read | lifecycle tests, integration suite | ❌ **survived** (see 3.7); caught after a stale-node-cache test was added |
 
-**Score:** of 39 code mutations, 32 were caught on the first try and 7 survived (5 up to PM-2, 2 in PM-3). Every survivor led to a new or redesigned test, and all 39 are caught now. One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
+### PM-4: the simulator's fixes, by hand
+
+| # | Guarantee | Injected bug | Expected to catch | Result |
+|---|---|---|---|---|
+| 41 | S3 after a freeze: SIGKILL before the lease looks fresh | the agent's `_kill_if_past_eviction` removed | unit test; simulator seed 9 | ✅ caught by both |
+| 42 | No acting on a cache older than the registration | the registration-revision gate removed | unit test; simulator seed 25 | ✅ caught by both |
+| 43 | A watch batch never applies to a cache that was relisted under it | the informer's generation check removed | informer race test | ❌ **survived** (see 3.9); caught after the test was made damaging |
+| 44 | A list older than the cache never replaces it | the informer's "older list" check removed | informer race test | ✅ caught |
+
+### PM-4: canaries (the simulator's own "test the tests", TESTING.md 6.5)
+
+Each canary switches off one protection inside the simulator, and the simulator must report a violation of the expected invariant. Measured over the first 40 seeds:
+
+| Canary | Expected | Detected | First seed |
+|---|---|---|---|
+| `disable_fencing` (agent and shims never fence) | S3/S4 | 17/40 | 2 |
+| `agent_only_fencing` (shims ignore the lease) | S3/S4 | 15/40 | 2 |
+| `fence_after_eviction` (F > E, registration check off) | S3/S4 | 9/40 | 2 |
+| `measure_fence_from_ack_time` (+ no heartbeat timeout, see 4.10) | S3/S4 | 5/40 | 0 |
+| `disable_expectations` | S3/L2 | 2/40 | 2 |
+| `skip_bind_capacity_check` (+ no assume cache) | S2/S11 | 10/40 | 0 |
+| `extended_resource_soft_constraint` | S11 | 24/40 | 0 |
+| `provider_reuse_unit` (counting provider always returns unit 0) | S12 | 13/40 | 1 |
+| `ack_before_fsync` (the WAL acks without syncing) | S8 | 13/40 | 5 |
+| `watch_skip_on_compaction` (no 410) | S6 | 2/40 | 4 |
+
+`tests/sim/test_canaries.py` scans seeds from 0 for each canary and fails if its whole budget (200-1 000 seeds) passes clean. Two canaries started at 0/40; neither could be fixed by changing the canary (see 4.10 and 4.11).
+
+**Score:** of 43 code mutations, 35 were caught on the first try and 8 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4). Every survivor led to a new or redesigned test, and all 43 are caught now. One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
 
 ---
 
@@ -158,6 +186,11 @@ These are the valuable cases: each one is a test that *looked* like it covered s
 ### 3.8 Caught by the wrong test (#39, #40, first run)
 In the first batch, #39 and #40 were both reported "caught", by `test_sigterm_ignoring_workload…` and `test_two_phase_deletion…`. Neither test has anything to do with node events or eviction. Running them on *unmutated* code showed they were failing anyway (see 4.7). With that fixed, #40 survived and #39 was caught only by the demo test. **Lesson:** a mutation counts as caught only if the failing test is one that *should* fail, and the same test passes without the mutation. Check flakiness first.
 
+### 3.9 A race test whose stale batch was harmless (#43)
+**Bug:** the informer applies a watch batch even though a relist replaced the cache while the watch was in flight.
+**Why it survived:** the test's stale batch was a DELETED event for an object the newer list held at a higher `resource_version`, so the per-object version check skipped it anyway. That's defence in depth again (see 3.2). The damaging case is a stale MODIFIED for an object the newer list no longer has: with no current object to compare against, it would be resurrected.
+**Fix:** the test now uses exactly that case. **Lesson:** a race test has to deliver the stale message that does damage, not just *a* stale message.
+
 ---
 
 ## 4. Tests that were wrong
@@ -188,6 +221,18 @@ Two MVP tests delete a SIGTERM-ignoring workload and check that it survives SIGT
 ### 4.8 Two "stale cache" tests whose caches weren't stale (PM-3)
 Two tests, caught while writing them: (a) the orphan-GC test was meant to show that a controller whose *deployment* cache is behind doesn't delete the deployment's pods, but its deployment cache had in fact been refreshed, so it showed nothing; it now uses a second controller whose deployment cache is empty. (b) The node-event test failed with a Conflict because its *pod* cache was stale as well (it hadn't seen the `Unschedulable` status write), which a live system's watch would have delivered. **Lesson:** in a test about stale caches, write down which cache is stale and which is fresh, and set each one up deliberately.
 
+### 4.9 My own fix was the next bug (PM-4)
+The first fix for the simulator's seed 25 made the agent relist after registering. The simulator then failed seed 21 with an S6 violation. The fix relisted *while the informer's own watch was in flight*, the replies crossed, and an older list wiped a pod. It surfaced under an unrelated canary (`skip_bind_capacity_check`), and that oddity is what made it worth chasing. **Lesson:** run the whole sweep again after every fix, including the canaries, and treat an "unexpected" invariant in a canary run as a finding, not noise.
+
+### 4.10 A canary the system made impossible (PM-4)
+`measure_fence_from_ack_time` (renew the lease from when the heartbeat *reply* arrives, ADR-0012's classic bug) went undetected in 40 seeds. That wasn't the simulator being weak. In Chronos as built the bug can't cause harm: the heartbeat client times out after 0.4 s, so no reply later than that is ever accepted, and ack time trails send time by at most 0.4 s. A violation needs a gap above E − F − K − poll = 1.4 s. **Fix:** the canary removes both protections, and the generator gained a "degrade" fault (the link slows down, then dies), which is when the bug matters; now 5/40. **Lesson:** an undetectable canary means either a weak simulator or a second protection. Find out which, and write it down. Here it documents that the heartbeat timeout must stay below E − F − K.
+
+### 4.11 History too long to fall out of (PM-4)
+`watch_skip_on_compaction` was also 0/40: with 64 events of history, an agent that was cut off rarely fell far enough behind to need a 410. The simulator now keeps 16 (production keeps 10 000; what matters is how far behind an agent gets relative to the history), and detects it in 2/40.
+
+### 4.12 The simulator hung (PM-4)
+One seed under `fence_after_eviction` pegged a CPU forever. A simulated process start took zero time, so "kill past E" and "start again" alternated at one virtual instant without end. Starts now take 1-20 ms (fork + exec), and the engine raises a `SimError` for a livelock (100 000 events at one instant) or a runaway (2 million events) instead of hanging. **Lesson:** a test harness needs its own guard against running forever.
+
 ---
 
 ## 5. Real bugs the tests found
@@ -205,6 +250,9 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 | PM-1 | proxy deadlock: on Python 3.12 `Server.wait_closed()` waits for open connections | partition test hanging |
 | PM-2 | `chronosd wal-verify` would have truncated a torn tail while "verifying" | review while writing the CLI |
 | PM-3 | **lost wakeup**: the in-process watch registered its waiter inside a task, so a write landing before the task first ran went unnoticed until the 30 s timeout | the X-6 widget test (it creates an object right at startup), then pinned by a deterministic race test (#29) |
+| PM-4 | **after a whole-node freeze, the agent renewed its lease before the shim's next poll**, so the shim let a replaced workload run up to K alongside its replacement (S3; the "one shim poll" claim was false) | the simulator, seed 9 (and 24) |
+| PM-4 | **a resumed agent restarted evicted pods from its stale pod cache** after re-registering (S3; came in with PM-3's caching) | the simulator, seed 25 |
+| PM-4 | **concurrent relist and watch:** an older list wiped a pod the watch had delivered (S6; came in with the first fix for seed 25) | the simulator's S6 check, seed 21 |
 | PM-3 | a pod started by the agent was never reported Running: reporting needs a second sync, and nothing triggered one without polling | `test_watch.py` (#37) |
 | PM-3 | chronosd took more than 10 s to stop: uvicorn waited for the agents' 30 s long-poll watches | integration teardown timing out |
 | PM-3 | the first fix for that hung chronosd for good: answering *every* watch at once on shutdown made the in-process informers spin without ever yielding to the event loop | integration teardown again; about 30 leaked test servers at 20% CPU each (load average 180), which is how it was noticed. `Cluster.close()` now SIGKILLs a chronosd that ignores SIGTERM and fails the test |
@@ -218,9 +266,10 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 
 ## 6. Known blind spots (left on purpose, with a plan)
 
-- **Power loss** is not simulated (see 3.5). Covered for now by the sync-accounting test; the simulator's `ack_before_fsync` canary comes in PM-4.
-- **Equivalent mutants and coverage:** the catalogue is curated, not exhaustive. The deterministic simulator (PM-4) adds flag-gated canary bugs (`disable_fencing`, `disable_expectations`, `skip_bind_capacity_check`, …) that run on every PR across hundreds of seeds, which turns this manual log into a regression gate.
-- **Network faults beyond a clean cut** (delay, loss, one-way partitions) come with the chaos fault proxy in PM-6.
+- **Power loss** is modelled only in the simulator: its disk keeps just the synced bytes, and the `ack_before_fsync` canary proves the check works. Real power loss on real hardware is not tested.
+- **The simulator drives the agent's real code, but not its asyncio shell** (`Agent.run`, the `Signal` wake-ups, the real `ProcessRuntime`). Those stay covered by the real-process integration tests; the chaos harness (PM-6) re-checks the same invariants on real processes.
+- **Network faults on real sockets** (delay, loss, one-way partitions through a proxy) come with the chaos fault proxy in PM-6; the simulator already models them on its own links.
+- **Equivalent mutants and coverage:** the catalogue is curated, not exhaustive; the 10 canaries now run on every PR (`tests/sim/test_canaries.py`), so the most important protections are re-checked automatically.
 
 ---
 
@@ -230,6 +279,8 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 - *A mutation caught by a flaky test isn't caught* (3.8): check that the failing test is the one that should fail.
 - *Construct the race, don't wait for it* (3.7, and the lost-wakeup test): a stale cache or a write in a 1-line gap won't show up in a real run often enough to trust.
 - *Making the system faster broke two tests* (4.7): they relied on polling's delay.
+- *The simulator found three real bugs in its first hour* (section 5), two of them introduced by my own recent changes (PM-3's caching, and a fix).
+- *An undetectable canary taught me a design rule* (4.10): the heartbeat timeout must stay below E − F − K, or the "send time" rule stops mattering.
 - *Defence in depth hides bugs from tests* (3.2): the agent and the shim both fence, so a test must switch one off to prove the other works.
 - *`kill -9` is not power loss* (3.5): crash tests can't see a missing fsync; sync accounting can.
 - *Crash tests don't cover error paths* (3.4): disk full is not a crash.
@@ -237,4 +288,4 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 - *Run it on the other OS* (section 5): three harness bugs existed only on Linux.
 
 ### Blog outline
-"I broke my orchestrator 39 times on purpose": the method (section 1) → three stories (3.2 the agent rescuing the shim, 3.5 the invisible fsync, 4.1 the harness that didn't crash) → the benchmark showing why group commit exists (10× throughput at 32 writers) → what I'd automate next (the simulator's canaries).
+"I broke my orchestrator 43 times on purpose, then built a simulator to do it for me": the method (section 1) → three stories (3.2 the agent rescuing the shim, 3.5 the invisible fsync, 4.1 the harness that didn't crash) → the benchmark showing why group commit exists (10× throughput at 32 writers) → what I'd automate next (the simulator's canaries).

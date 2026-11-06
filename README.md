@@ -14,11 +14,12 @@ level-triggered reconciliation. Workloads are real OS processes.
 > real-process test.
 
 **Status: `v0.1-mvp` + PM-1 (self-fencing) + PM-2 (durability) + PM-3 (watch and
-informers).** The core loop works end to end; workloads are fenced when their node loses
+informers) + PM-4 (deterministic simulation).** The core loop works end to end; workloads are fenced when their node loses
 contact with the control plane, so a paused, crashed or partitioned node can't cause duplicate
 replicas; every acknowledged write is on disk before it's acknowledged, so a `chronosd` crash
-loses nothing; and controllers and agents react to changes through watches instead of polling.
-The
+loses nothing; controllers and agents react to changes through watches instead of polling;
+and a deterministic simulator runs the real store, controllers and agent through thousands of
+seeded fault schedules, checking every safety invariant after every event. The
 [limitations](#limitations-what-chronos-does-not-do-yet) are listed below, each with the block
 that fixes it, plus the [design limitations](#design-limitations-deliberate) that stay.
 
@@ -145,6 +146,8 @@ have been replaced by the designs they stood in for.
 | **S6** a watch from revision r delivers every change after r, in order, or fails with `410 Gone`; it never silently skips | ✅ | [replay from every revision of random histories, whole kind, node filter and small batches](tests/property/test_watch_props.py); [both clients, long-poll wake-up, compaction](tests/contract/test_store_client.py); [informer relists after 410 and after a restart](tests/unit/test_runtime.py) |
 | **S7** | ❌ not yet | rollouts: see Limitations |
 
+Every safety row above (S1-S6, S8, S11, S12) is also checked by the [simulator](tests/sim/test_sim.py) after every event of every seed, and L1-L3 and L5 at the end of each run.
+
 **Modularity:** a resource that exists only in test code, `example.com/widget`, plus a
 test-only scheduler plugin, pass the scheduling and bind properties with no production-code
 changes ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)); a test-only
@@ -155,9 +158,21 @@ and a reconcile loop through the kind and controller registries
 ([`test_kind_registry.py`](tests/integration/test_kind_registry.py)).
 
 **How the tests are layered:** unit tests, Hypothesis property and stateful tests (100 examples
-locally, 1 000 in CI, 20 000 with `make test-nightly`), integration tests that run a real
-`chronosd` and agents as subprocesses, and a durability harness that crashes the store at
-every crash point and checks what recovery gives back. CI runs everything on Ubuntu and macOS.
+locally, 1 000 in CI, 20 000 with `make test-nightly`), a **deterministic simulator**, integration
+tests that run a real `chronosd` and agents as subprocesses, and a durability harness that
+crashes the store at every crash point and checks what recovery gives back. CI runs everything
+on Ubuntu and macOS.
+
+**The simulator** (`python -m chronos.sim --seed N`, [ADR-0016](docs/adr/0016-deterministic-simulation-testing.md)) runs the
+*real* store (WAL and recovery included), controllers and agent under virtual time and one
+seeded RNG. It injects node, agent and control-plane crashes, pauses, whole-node freezes,
+partitions, delay spikes, drops and workload crash storms, and checks S1-S6, S8, S11 and S12
+after every event, then L1-L3 and L5 once the run is quiet. Any failure replays exactly from
+its seed and can be shrunk with `--minimize`. Ten **canary bugs** (fencing off, expectations off,
+no bind capacity check, F > E, ack before fsync, ...) must each be detected; they are, within
+the first six seeds. On its first runs it found three real bugs, now fixed and replayed on
+every PR ([`tests/sim/regressions.txt`](tests/sim/regressions.txt)). CI: 200 seeds per PR,
+10 000 nightly.
 
 ## Limitations: what Chronos does not do yet
 
@@ -165,7 +180,7 @@ every crash point and checks what recovery gives back. CI runs everything on Ubu
 > about fencing, crash backoff and one-phase deletion; PM-2 closed durability; PM-3 closed
 > polling.
 
-1. **No chaos testing or deterministic simulation.** Fault testing is limited to scripted integration tests (whole-node kill, agent pause and crash, a cut partition, a whole-node freeze). There are no randomized fault schedules, network partitions, delays or message loss, and no canary bugs proving test strength. → PM-4 (simulator), PM-6 (chaos harness).
+1. **No chaos testing on real processes.** Randomized faults (partitions, delays, loss, crashes, freezes) run in the deterministic simulator, but against real processes and sockets only scripted integration tests exist. → PM-6 (chaos harness).
 2. **No GPU/CUDA support: planned, Stage 2 (deferred).** Nothing detects or uses GPUs, and no CUDA runs. Stage 1 provides the seams GPU support plugs into: extended resources (X-1/X-2), workload types (X-4) and resource providers (X-5), proven in-process by PX.9 ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)).
 3. **No resource isolation or enforcement.** CPU, memory and extended-resource requests are used for *placement accounting only*; a process can use more than it requested. → memory-limit enforcement PM-9a (P10.3); CPU stays advisory (ADR-0014).
 4. **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → Backlog (P11.x, ADR-0018); not scheduled.
@@ -181,7 +196,7 @@ every crash point and checks what recovery gives back. CI runs everything on Ubu
 These stay true at the end of Stage 1; they are trade-offs, not missing work.
 
 1. **A control-plane outage longer than `fence_timeout` stops every workload (fencing Option A).** Agents can't tell a dead control plane from a partition, so they fence. This trades availability for safety (no duplicates). Real Kubernetes keeps pods running while the API server is down; Chronos deliberately doesn't. When the control plane returns, startup grace prevents evictions and agents restart their still-bound pods (L4). A smarter fencing rule (e.g. peer checks) was rejected as too complex; the real fix is control-plane HA, which is in the Backlog (P11.x, ADR-0018). Tested by U2.2 (b) ([`test_long_outage_fences_everything_then_reconverges`](tests/integration/test_control_plane_restart.py)).
-2. **"No duplicate replicas" (S3/S4) is scoped to agent pause, agent crash and network partition.** For a **whole-node freeze** (a VM pause that stops the shims too), there's a bounded window of **at most one shim poll (100 ms)** after the node resumes, during which a stale workload may run alongside its replacement before the shim SIGKILLs it. Kubernetes has the same limit. The README must not claim "no duplicates under any pause".
+2. **"No duplicate replicas" (S3/S4) is scoped to agent pause, agent crash and network partition.** For a **whole-node freeze** (a VM pause that stops the shims too), there's a bounded window of **at most one shim poll (100 ms)** after the node resumes, during which a stale workload may run alongside its replacement before the shim (or the agent, whichever runs first) SIGKILLs it. The simulator found this bound broken once (the agent renewed its lease before the shim's poll); it holds now, and is checked after every event. Kubernetes has the same limit. The README must not claim "no duplicates under any pause".
 3. **Fencing assumes the node's monotonic clock keeps advancing across a freeze.** That holds for Chronos's single-host setup (all "nodes" share the host clock). On real VMs it depends on the hypervisor's clock handling; if the guest clock stalled, the window in #2 could extend up to `fence_timeout`.
 
 ## Roadmap
@@ -193,7 +208,7 @@ The block names used above, in build order:
 | **PM-1** ✅ | Self-fencing (agent + per-pod shim), restart with backoff, orphan cleanup, two-phase deletion, workload-type and resource-provider seams |
 | **PM-2** ✅ | Durability: write-ahead log with CRC framing, snapshots, crash-point-tested recovery |
 | **PM-3** ✅ | Watch + informers + work queue + expectations + assume cache, replacing polling; kind and controller registries |
-| **PM-4** | Deterministic simulation with canary bugs |
+| **PM-4** ✅ | Deterministic simulation with canary bugs |
 | **PM-5** | Full CLI, structured logs, events, `/metrics`, Prometheus + Grafana |
 | **PM-6** | Chaos harness (partitions, pauses, delays) and benchmarks |
 | **PM-9** | Probes, rolling updates, memory limits, drain; final write-up |
@@ -213,6 +228,7 @@ src/chronos/
   client/       StoreClient protocol, local and HTTP clients
   agent/        chronos-agent, the process runtime, resource providers
   shim/         chronos-shim: per-pod wrapper that enforces fencing
+  sim/          deterministic simulator: engine, network, disk, faults, invariants, canaries
   cli/          chronosctl
   testing/      test workload, real-cluster fixture, kill_node()
 docs/adr/       architecture decision records

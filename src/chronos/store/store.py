@@ -173,6 +173,11 @@ class Store:
             items = [o for o in items if labels.items() <= o.metadata.labels.items()]
         return [self._present(o) for o in items], self._revision
 
+    def view(self, kind: type[ApiObject]) -> Mapping[str, ApiObject]:
+        """The stored objects themselves, not copies: for invariant checkers that read
+        everything after every event (the simulator). Never mutate them."""
+        return self._objects.get(kind.__name__, {})
+
     def pods_on(self, node_name: str) -> builtins.list[Pod]:
         return self.list(Pod, node_name=node_name)[0]
 

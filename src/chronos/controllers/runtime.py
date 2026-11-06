@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import heapq
+import itertools
 import logging
 import random
 from abc import ABC, abstractmethod
@@ -98,6 +100,7 @@ class Informer[T: ApiObject]:
         watch_wait: float = WATCH_TIMEOUT,
         retry_base: float = 0.1,
         retry_cap: float = 2.0,
+        rng: random.Random | None = None,
     ) -> None:
         self.kind = kind
         self.revision = 0
@@ -109,12 +112,13 @@ class Informer[T: ApiObject]:
         self._node_key = info(kind).indexes.get(NODE_INDEX) if node_name is not None else None
         self._wait = watch_wait
         self._retry = (retry_base, retry_cap)
-        self._rng = random.Random()
+        self._rng = rng or random.Random()
         self._items: dict[str, T] = {}
         self._handlers: list[Handler[T]] = []
         self._indexes: dict[str, tuple[IndexKey[T], dict[str, set[str]]]] = {}
         self._synced: list[asyncio.Future[None]] = []
         self.needs_relist = True
+        self._generation = 0  # bumped by every relist that replaces the cache
 
     # ---- consumers
 
@@ -178,7 +182,15 @@ class Informer[T: ApiObject]:
             self.needs_relist = True
 
     async def relist(self) -> None:
+        """Replace the cache with a fresh list. Safe while a watch is in flight: a list
+        older than the cache is dropped (unless a relist is due, e.g. after the store
+        restarted from an older state), and a watch that was in flight across a relist
+        is dropped too (`watch_once`). Found by the simulator: crossing replies made
+        an older list wipe a pod the watch had just delivered."""
         items, revision = await self._client.list(self.kind, node_name=self._node)
+        if revision < self.revision and not self.needs_relist:
+            return
+        self._generation += 1
         fresh = {o.metadata.name: o for o in items}
         for name in sorted(self._items.keys() - fresh.keys()):
             self._remove(name)
@@ -197,9 +209,12 @@ class Informer[T: ApiObject]:
                     future.set_result(None)
 
     async def watch_once(self) -> None:
+        generation = self._generation
         batch = await self._client.watch(
             self.kind, self.revision, wait=self._wait, node_name=self._node
         )
+        if generation != self._generation:
+            return  # a relist replaced the cache meanwhile: this batch is about the old one
         for event in batch.events:
             obj = event.object
             current = self._items.get(obj.metadata.name)
@@ -263,6 +278,10 @@ class Informers:
 
 
 class WorkQueue:
+    """Delayed keys wait in a heap, not in timer tasks: `get()` moves the due ones into
+    the queue. So the queue needs no event loop of its own, and the simulator can
+    drive it step by step on virtual time (ADR-0016)."""
+
     def __init__(self, clock: Clock, *, base_delay: float = 0.005, max_delay: float = 30.0) -> None:
         self._clock = clock
         self._delays = (base_delay, max_delay)
@@ -272,10 +291,25 @@ class WorkQueue:
         self._dirty: set[str] = set()  # re-added while processing: queue again when done
         self._failures: dict[str, int] = {}
         self._ready = Signal()
-        self._timers: set[asyncio.Task[None]] = set()
+        self._later: list[tuple[float, int, str]] = []  # (due, sequence, key)
+        self._seq = itertools.count()
 
     def __len__(self) -> int:
         return len(self._queue)
+
+    def ready(self) -> bool:
+        """Is a key available now (delayed keys that are due included)?"""
+        self._promote()
+        return bool(self._queue)
+
+    def next_due(self) -> float | None:
+        """When the earliest delayed key is due, if any."""
+        return self._later[0][0] if self._later else None
+
+    def _promote(self) -> None:
+        now = self._clock.monotonic()
+        while self._later and self._later[0][0] <= now:
+            self.add(heapq.heappop(self._later)[2])
 
     def add(self, key: str) -> None:
         if key in self._processing:
@@ -289,14 +323,8 @@ class WorkQueue:
         if delay <= 0:
             self.add(key)
             return
-
-        async def later() -> None:
-            await self._clock.sleep(delay)
-            self.add(key)
-
-        task = asyncio.create_task(later())
-        self._timers.add(task)
-        task.add_done_callback(self._timers.discard)
+        heapq.heappush(self._later, (self._clock.monotonic() + delay, next(self._seq), key))
+        self._ready.notify()  # a waiting get() must recompute how long to sleep
 
     def add_rate_limited(self, key: str) -> None:
         """Back off per key: base, 2·base, 4·base, ... up to max_delay."""
@@ -312,8 +340,10 @@ class WorkQueue:
         self._failures.pop(key, None)
 
     async def get(self) -> str:
-        while not self._queue:
-            await self._ready.wait()
+        while not self.ready():
+            due = self.next_due()
+            at_most = None if due is None else max(due - self._clock.monotonic(), 0.0)
+            await self._ready.wait(self._clock, at_most)
         key = self._queue.popleft()
         self._queued.discard(key)
         self._processing.add(key)
@@ -326,8 +356,7 @@ class WorkQueue:
             self.add(key)
 
     def close(self) -> None:
-        for task in self._timers:
-            task.cancel()
+        self._later.clear()
 
 
 # ---- expectations --------------------------------------------------------------------

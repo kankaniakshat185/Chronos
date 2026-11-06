@@ -1,4 +1,4 @@
-.PHONY: lint type test test-nightly test-durability check demo-cluster
+.PHONY: lint type test test-nightly test-durability test-sim check demo-cluster
 
 lint:
 	uv run ruff check .
@@ -17,6 +17,10 @@ test-nightly:
 # S8 exit run: every crash point x 50 seeds.
 test-durability:
 	DURABILITY_SEEDS=50 uv run pytest -n auto -q tests/durability
+
+# Deterministic simulation: 200 seeds, the regressions and every canary (what CI runs).
+test-sim:
+	SIM_SEEDS=200 uv run pytest -n auto -q tests/sim
 
 check: lint type test
 

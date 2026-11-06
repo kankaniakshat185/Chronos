@@ -2,7 +2,7 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P5 | — | — |
+| Accepted | 2026-11-06 | P5 | — | — |
 
 ## 1. What
 A **discrete-event simulator** runs the *real* store and core logic under **virtual time** with a **single seeded RNG**, injecting network, process, node and disk faults. It checks every safety invariant after **every event** and liveness after quiescence. Any failure is reproducible from its seed and can be minimized automatically.
@@ -69,6 +69,9 @@ class Sim:
 ### Edge cases & failure handling
 - **Sim bug vs system bug:** each failure report includes the trace, so you decide which; sim bugs get fixed in `sim/`, with a note in the devlog.
 - **Divergence from the real shell:** every chaos-found bug must be reproduced in the sim (new fault type if needed) before it's considered fixed.
+
+### Implementation status (2026-11-06)
+Implemented as `src/chronos/sim/` (`python -m chronos.sim --seed N [--trace F] [--minimize] [--canary C]`): `engine.py` (event heap ordered by time and sequence, one seeded RNG, SHA-256 of the trace), `network.py` (per-direction links: delay, drop, spikes, cuts; requests and replies are separate messages; client timeouts as in `HttpStoreClient`), `disk.py` (fsync recorded, not performed; a crash truncates every file to its last synced size), `control.py`, `nodes.py`, `faults.py`, `invariants.py`, `canaries.py`, `run.py`. Deviations from the sketch: the **real `Agent`** runs too, not a re-implementation. Its coroutines are sim `Task`s that may only await sim futures, and the control plane's coroutines are driven by `run_sync()`, which works because in full-sync mode they never suspend. That needed four injection points in production code (a heap-based `WorkQueue`, `rng`/`new_epoch` on `Agent`, `rng` on `Informer`, `new_name` on `DeploymentController`) and one read-only accessor, `Store.view()`. Process starts take 1-20 ms; the engine raises on livelock or runaway. The sim uses a 16-event watch history so compaction is common. `measure_fence_from_ack_time` also removes the heartbeat timeout, which alone masks it (testing-the-tests.md 4.10). Results: the sim found three real bugs on its first runs (an agent renewing its lease before the shim could kill a frozen node's replaced workload; a resumed agent restarting evicted pods from a stale cache; an informer race between a relist and an in-flight watch), all fixed with unit tests and regression seeds in `tests/sim/regressions.txt`. All 10 canaries are detected within the first 6 seeds. Budget: about 1 s per seed per core; CI runs 200 seeds, the regressions and every canary per PR, and 10 000 seeds nightly.
 
 ## 5. Consequences
 **Positive:** orders of magnitude more interleavings than real tests; every bug reproducible from a seed; small counterexamples; measurable test strength (canaries); a standout resume and interview point.

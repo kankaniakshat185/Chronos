@@ -163,6 +163,12 @@ class ProcessRuntime:
             self._stopping.add(uid)
             self._spawn(self._stop(uid, self._handles[uid]))
 
+    def kill_now(self, uid: str) -> None:
+        """SIGKILL the group at once (fenced): replacements may already be running."""
+        self._fenced.add(uid)
+        if (proc := self._handles.get(uid)) is not None:
+            _killpg(proc.pid, signal.SIGKILL)
+
     def forget(self, uid: str) -> None:
         self._procs.pop(uid, None)
 

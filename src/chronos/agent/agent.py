@@ -60,10 +60,13 @@ class Agent:
         resync_interval: float = 1.0,
         backoff: Backoff | None = None,
         watch_wait: float = 30.0,
+        rng: random.Random | None = None,
+        new_epoch: Callable[[], str] = lambda: uuid.uuid4().hex,
     ) -> None:
         self.name = name
         self.epoch = ""
         self.fenced = False
+        self.registered_at = 0  # the store revision of the latest registration, see sync_once
         self.last_ok_send = -math.inf
         self._capacity = dict(capacity)
         self._client = client
@@ -72,15 +75,18 @@ class Agent:
         self._fencing = fencing
         self._resync_interval = resync_interval
         self._backoff = backoff or Backoff()
-        self._rng = random.Random()
-        self.pods = Informer(client, Pod, clock, node_name=name, watch_wait=watch_wait)
+        self._rng = rng or random.Random()
+        self._new_epoch = new_epoch
+        self.pods = Informer(
+            client, Pod, clock, node_name=name, watch_wait=watch_wait, rng=self._rng
+        )
         self._wake = Signal()
         self.pods.add_handler(lambda _old, _new: self._wake.notify())
         runtime.on_change = self._wake.notify
 
     async def register(self) -> None:
         """Register under a new epoch, retrying (with jittered backoff) until answered."""
-        epoch = uuid.uuid4().hex
+        epoch = self._new_epoch()
         attempt = 0
         while True:
             sent = self._clock.monotonic()
@@ -96,13 +102,30 @@ class Agent:
                 raise AgentRejected(str(exc)) from None
             self._runtime.eviction_timeout = reply.eviction_timeout
             self.epoch = epoch
+            self.registered_at = reply.node.metadata.resource_version
             self._accepted(sent)
             log.info("registered node %s (epoch %s)", self.name, epoch[:8])
             return
 
     def _accepted(self, sent: float) -> None:
+        # Coming back from beyond E (e.g. the whole node was frozen): the server may
+        # already have replaced these workloads. Kill them *before* the lease looks
+        # fresh, or the shims would see the new lease and let them run (found by the
+        # simulator: a re-register within one shim poll of a thaw beat the shim).
+        self._kill_if_past_eviction()
         self.last_ok_send = max(self.last_ok_send, sent)
         self._runtime.write_lease(self.last_ok_send)
+
+    def _kill_if_past_eviction(self) -> None:
+        """The shim's second rule, applied by the agent too: a lease older than E means
+        replacements may be running, so no grace period: SIGKILL now."""
+        evict = self._runtime.eviction_timeout
+        if evict is None or self._clock.monotonic() - self.last_ok_send <= evict:
+            return
+        for uid, proc in self._runtime.snapshot().items():
+            if proc.running:
+                log.warning("pod %s: lease older than eviction timeout: SIGKILL", proc.pod_name)
+                self._runtime.kill_now(uid)
 
     async def heartbeat_once(self) -> None:
         sent = self._clock.monotonic()  # the SEND time is what fencing may rely on
@@ -118,6 +141,7 @@ class Agent:
         self._accepted(sent)
 
     async def fence_check(self) -> None:
+        self._kill_if_past_eviction()
         stale = should_fence(
             self.last_ok_send, self._clock.monotonic(), self._fencing.fence_timeout
         )
@@ -132,9 +156,25 @@ class Agent:
             self.fenced = False
             log.info("heartbeat accepted again: leaving Fenced")
 
+    async def _caught_up_with_registration(self) -> bool:
+        """A new epoch means the server may have evicted everything the old one ran, and
+        the watch may still be catching up. Act on nothing older than this registration
+        (found by the simulator: a resumed agent restarted evicted pods from its stale
+        cache, next to their replacements)."""
+        if self.pods.revision >= self.registered_at:
+            return True
+        try:
+            await self.pods.relist()
+        except StoreError as exc:
+            log.warning("sync: can't list pods after registering: %s", exc)
+            return False
+        return self.pods.revision >= self.registered_at
+
     async def sync_once(self) -> None:
         if not self.pods.has_synced:
             return  # an empty cache would mean "stop everything"
+        if not await self._caught_up_with_registration():
+            return
         pods = self.pods.list()
         await self.fence_check()  # never start anything on a stale lease
         now = self._clock.monotonic()

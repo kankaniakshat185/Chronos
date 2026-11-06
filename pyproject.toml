@@ -74,6 +74,7 @@ markers = [
     "invariant(id): test checks the named invariant from docs/TESTING.md section 2",
     "integration: real chronosd + agents + workload processes",
     "chaos: long-running randomized fault injection",
+    "sim: deterministic simulation runs (SIM_SEEDS seeds; canaries in tests/sim/test_canaries.py)",
     "quarantine: known-flaky test, excluded from PR runs (max 7 days)",
 ]
 
