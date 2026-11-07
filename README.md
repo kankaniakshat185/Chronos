@@ -180,14 +180,17 @@ have been replaced by the designs they stood in for.
 
 Every safety row above (S1-S8, S11, S12) is also checked by the [simulator](tests/sim/test_sim.py) after every event of every seed, and L1-L3 and L5 at the end of each run.
 
-**Modularity:** a resource that exists only in test code, `example.com/widget`, plus a
-test-only scheduler plugin, pass the scheduling and bind properties with no production-code
-changes ([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)); a test-only
-workload type and resource provider run a real process through the unchanged agent runtime
-([`test_seams.py`](tests/integration/test_seams.py)); and a kind plus a controller that exist
-only in test code get the HTTP API, watch, store validation, WAL durability, manifest parsing
-and a reconcile loop through the kind and controller registries
-([`test_kind_registry.py`](tests/integration/test_kind_registry.py)).
+**Modularity:** a resource that exists only in test code, `example.com/widget`, with a
+test-only scheduler plugin, workload type and resource provider
+([`tests/extensions.py`](tests/extensions.py)), passes the scheduling and bind properties
+([`test_modularity_widget.py`](tests/property/test_modularity_widget.py)), runs a real process
+through the unchanged agent runtime ([`test_seams.py`](tests/integration/test_seams.py)), and
+holds every invariant in the simulator under faults, where a deliberately broken test provider
+is caught as S12 ([`test_seam_proof.py`](tests/sim/test_seam_proof.py)). A kind plus a
+controller that exist only in test code get the HTTP API, watch, store validation, WAL
+durability, manifest parsing and a reconcile loop, and the pods they own are left alone by the
+deployment controller ([`test_kind_registry.py`](tests/integration/test_kind_registry.py)).
+How each Stage 2 task plugs in: [docs/PHASE2-EXTENSION-POINTS.md](docs/PHASE2-EXTENSION-POINTS.md).
 
 **How the tests are layered:** unit tests, Hypothesis property and stateful tests (100 examples
 locally, 1 000 in CI, 20 000 with `make test-nightly`), a **deterministic simulator**, integration
@@ -256,7 +259,7 @@ The block names used above, in build order:
 | **PM-5** ✅ | Full CLI, structured logs, events, `/metrics`, Prometheus + Grafana |
 | **PM-6** ✅ | Chaos harness (partitions, pauses, delays) and benchmarks |
 | **PM-9a** ✅ | Probes, rolling updates (S7), memory limits, drain |
-| **PM-9b** | Seam proof: a test-only resource, workload type and provider through scheduling, bind and the simulator, unchanged |
+| **PM-9b** ✅ | Seam proof: a test-only resource, plugin, workload type and provider through scheduling, bind, a real process and the simulator; the Stage 2 guide checked against the code |
 | **PM-9c** | Final write-up |
 | Stage 2 | GPU-aware scheduling and CUDA workloads, on the seams above (deferred) |
 

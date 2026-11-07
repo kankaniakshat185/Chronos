@@ -14,7 +14,9 @@ until then the key's reconcile does nothing (ADR-0009 3.C, the `disable_expectat
 canary).
 
 Pods whose owner is gone are garbage-collected, after a live read confirms the
-owner really is gone and the cache isn't just behind.
+owner really is gone and the cache isn't just behind. Only pods this controller made
+(the `chronos.dev/deployment` label) are its business: another kind's controller may
+own pods too (Stage 2's Job will), and to this one they'd look like orphans.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from chronos.client.local import LocalStoreClient
 from chronos.common.clock import Clock
 from chronos.controllers.runtime import Controller, Expectations, Informers, register_controller
 from chronos.core.reconcile import (
+    DEPLOYMENT_LABEL,
     CreatePod,
     DeletePod,
     UpdateStatus,
@@ -41,7 +44,12 @@ log = logging.getLogger(__name__)
 
 _SUFFIX_CHARS = "bcdfghjklmnpqrstvwxz2456789"  # no vowels: no accidental words
 UID = "uid"
-OWNER = "owner"
+OWNER = "deployment-owner"
+
+
+def _owner(pod: Pod) -> str | None:
+    """The deployment uid of a pod this controller made, else None."""
+    return pod.metadata.owner if DEPLOYMENT_LABEL in pod.metadata.labels else None
 
 
 def pod_name(deployment: str) -> str:
@@ -68,7 +76,7 @@ class DeploymentController(Controller):
         self._deployments = informers.get(Deployment)
         self._pods = informers.get(Pod)
         self._deployments.add_index(UID, lambda d: d.metadata.uid)
-        self._pods.add_index(OWNER, lambda p: p.metadata.owner)
+        self._pods.add_index(OWNER, _owner)
         self.expectations = Expectations(clock, expectations_ttl)
         super().__init__(clock, [self._deployments, self._pods], resync_period=resync_period)
         self._deployments.add_handler(self._on_deployment)
@@ -82,7 +90,7 @@ class DeploymentController(Controller):
     def _on_pod(self, old: Pod | None, new: Pod | None) -> None:
         pod = new or old
         assert pod is not None
-        owner = pod.metadata.owner
+        owner = _owner(pod)
         if owner is None:
             return
         if old is None:
@@ -92,7 +100,7 @@ class DeploymentController(Controller):
         self.queue.add(owner)
 
     def keys(self) -> list[str]:
-        owners = {p.metadata.owner for p in self._pods.list() if p.metadata.owner}
+        owners = {o for p in self._pods.list() if (o := _owner(p)) is not None}
         return sorted(owners | set(self._deployments_by_uid()))
 
     def _deployments_by_uid(self) -> dict[str, Deployment]:

@@ -2,7 +2,7 @@
 
 Chronos makes strong claims: "never more than R replicas", "an acknowledged write survives a crash", "a pod never lands on a node without enough slots". Each claim is backed by tests. But a passing test only proves something if it *would fail* when the claim breaks. This log records how that was checked: by deliberately breaking the code that upholds each claim and confirming that a test notices.
 
-It covers the MVP through PM-9a (67 hand-made mutations plus the simulator's 11 canaries so far), and gets a new entry every time a guarantee is added.
+It covers the MVP through PM-9b (70 hand-made mutations plus the simulator's 11 canaries so far), and gets a new entry every time a guarantee is added.
 
 ---
 
@@ -158,6 +158,14 @@ For this block the mutations were run by a small script (kept outside the repo) 
 | 66 | The chaos checker sees a surge breach | S7 surge never flagged | chaos checker unit tests | ✅ caught |
 | 67 | The chaos checker sees ready pods pushed below the floor in a calm window | S7 availability never flagged | chaos checker unit tests | ✅ caught |
 
+### PM-9b: the seam proof (PX.9 final)
+
+| # | Guarantee | Injected bug | Expected to catch | Result |
+|---|---|---|---|---|
+| 68 | A registered provider is the one that hands out a resource's units (X-5) | `Providers` ignores the registry and always uses the counting provider | `test_seams.py`, the simulator seam proof | ✅ caught by both: the process got units "0", "1" instead of the test provider's "w0", "w1", the simulator saw no widget allocations, and the negative control (a broken test provider) went unnoticed |
+| 69 | The simulator really admits templates through the workload type (X-4) | the test-only type rejects every template (a mutation in test code) | the simulator seam proof | ✅ caught: no widget deployment could be created |
+| 70 | Another kind's controller can own pods (X-6; Stage 2's Job) | none needed: the bug was already there | a new test: a pod owned by a test-only kind must survive | ❌ the **existing code failed it**: the deployment controller deleted the pod within 2 s as an orphan of a Deployment (see 3.12). Fixed; the test is green |
+
 ### PM-4: canaries (the simulator's own "test the tests", TESTING.md 6.5)
 
 Each canary switches off one protection inside the simulator, and the simulator must report a violation of the expected invariant. Measured over the first 40 seeds:
@@ -180,7 +188,7 @@ Since PM-9a, `disable_expectations` is also caught as S7 (10 of its 14 detection
 
 `tests/sim/test_canaries.py` scans seeds from 0 for each canary and fails if its whole budget (200-1 000 seeds) passes clean. Two canaries started at 0/40; neither could be fixed by changing the canary (see 4.10 and 4.11).
 
-**Score:** of 65 code mutations, 52 were caught on the first try and 13 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4, 1 in PM-5, 2 in PM-6, 2 in PM-9a). Every survivor led to a new or redesigned test, and all 65 are caught now. (#55 plants a fault instead of changing code.) One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
+**Score:** of 67 code mutations, 54 were caught on the first try and 13 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4, 1 in PM-5, 2 in PM-6, 2 in PM-9a). Every survivor led to a new or redesigned test, and all 67 are caught now. (#69 mutates test code; #70 is a real bug rather than an injected one.) (#55 plants a fault instead of changing code.) One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
 
 ---
 
@@ -241,6 +249,11 @@ In the first batch, #39 and #40 were both reported "caught", by `test_sigterm_ig
 **Bug:** adding the probe fields to the pod template changes the JSON every template hashes to, even when they're unset, so after an upgrade every pod looks outdated and every deployment rolls out for nothing.
 **Why it survived:** every test computes its hashes with the code under test, so old and new always agree with each other.
 **Fix:** a unit test pins the hash that the previous commit's code computes for a fixed template (`340494c604`, computed by running the old code from `git archive`). **Lesson:** compatibility across versions can't be tested inside one version; pin a value from the old one.
+
+### 3.12 A seam that only worked for one owner (#70)
+**Bug:** the deployment controller garbage-collected every pod whose `metadata.owner` wasn't a Deployment. Any other controller that owns pods, like Stage 2's Job, would have had them deleted within moments.
+**Why no test saw it:** the X-6 proof registered a test-only kind and controller, but that controller didn't own pods. Every owned pod in every other test belonged to a Deployment.
+**Fix:** the deployment controller handles only pods it made (they carry the `chronos.dev/deployment` label, and always have since the controller was written), and its owner index has its own name so a shared informer can't hand it another controller's. A test creates a pod owned by a test-only kind against the real `chronosd` app and checks that it survives. **Lesson:** a seam isn't proven until the test-only extension does what the real one will (here, own pods), not just the smallest thing that compiles.
 
 ---
 
@@ -323,6 +336,7 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 | PM-4 | **after a whole-node freeze, the agent renewed its lease before the shim's next poll**, so the shim let a replaced workload run up to K alongside its replacement (S3; the "one shim poll" claim was false) | the simulator, seed 9 (and 24) |
 | PM-4 | **a resumed agent restarted evicted pods from its stale pod cache** after re-registering (S3; came in with PM-3's caching) | the simulator, seed 25 |
 | PM-4 | **concurrent relist and watch:** an older list wiped a pod the watch had delivered (S6; came in with the first fix for seed 25) | the simulator's S6 check, seed 21 |
+| PM-9b | **the deployment controller garbage-collected pods owned by any other kind**, which would have broken Stage 2's Jobs (X-6) | the seam proof, while checking `PHASE2-EXTENSION-POINTS.md` against the code (#70) |
 | PM-3 | a pod started by the agent was never reported Running: reporting needs a second sync, and nothing triggered one without polling | `test_watch.py` (#37) |
 | PM-3 | chronosd took more than 10 s to stop: uvicorn waited for the agents' 30 s long-poll watches | integration teardown timing out |
 | PM-3 | the first fix for that hung chronosd for good: answering *every* watch at once on shutdown made the in-process informers spin without ever yielding to the event loop | integration teardown again; about 30 leaked test servers at 20% CPU each (load average 180), which is how it was noticed. `Cluster.close()` now SIGKILLs a chronosd that ignores SIGTERM and fails the test |

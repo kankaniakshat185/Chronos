@@ -146,3 +146,18 @@ def test_a_registered_kind_is_durable_and_parses_from_manifests(
     manifest.write_text("kind: Widget\nmetadata: {name: w2}\nspec: {size: 2}\n")
     [parsed] = load(manifest)
     assert isinstance(parsed, Widget) and parsed.spec.size == 2
+
+
+async def test_pods_owned_by_another_kind_are_left_alone(api: HttpStoreClient) -> None:
+    """A new kind's controller can own pods (Stage 2's Job will): the deployment
+    controller must not garbage-collect them as orphans just because no Deployment
+    has that uid."""
+    from chronos.api import Pod, PodSpec  # noqa: PLC0415
+    from chronos.common.clock import RealClock  # noqa: PLC0415
+
+    owner = await api.create(widget("w-owner", 1))
+    meta = ObjectMeta(name="w-owner-pod", owner=owner.metadata.uid)
+    await api.create(Pod(metadata=meta, spec=PodSpec(command=["x"])))
+    await RealClock().sleep(2.0)  # the deployment controller reacts to the pod at once
+    pod = await api.get(Pod, "w-owner-pod")
+    assert pod.metadata.deletion_timestamp is None, "deleted as an orphan of a Deployment"

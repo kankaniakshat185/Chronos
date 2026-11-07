@@ -1,9 +1,10 @@
-"""Early proof of modularity (PX.9, X-9): a new resource and a new score plugin, from tests only.
+"""Proof of modularity (PX.9, X-9), scheduling and bind: a new resource and a new score
+plugin, from tests only.
 
-`example.com/widget` and the `test.FewestWidgetsLeft` plugin exist only in this
-file. Nothing in `src/` was changed for them: the scheduler and the store's bind
-treat the widget like any extended resource, and the plugin plugs in through the
-same registry the built-ins use.
+`example.com/widget` and the `test.FewestWidgetsLeft` plugin exist only in test code
+(`tests/extensions.py`). Nothing in `src/` was changed for them: the scheduler and the
+store's bind treat the widget like any extended resource, and the plugin plugs in
+through the same registry the built-ins use.
 """
 
 import asyncio
@@ -12,19 +13,11 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from chronos.api import Node, NodeCondition, Pod
-from chronos.core.schedule import NodeInfo, SchedulerConfig, register_score, resolve
+from chronos.core.schedule import SchedulerConfig, resolve
+from tests.extensions import FEWEST_WIDGETS_LEFT, WIDGET
 from tests.property.test_schedule_props import build, within_capacity
 
-WIDGET = "example.com/widget"
-
-
-def fewest_widgets_left(_: Pod, node: NodeInfo) -> int:
-    """Bin-pack widgets: prefer the node with the fewest free widgets (a test-only policy)."""
-    return 100 - min(node.free.get(WIDGET, 0), 100)
-
-
-register_score("test.FewestWidgetsLeft", fewest_widgets_left)
-PROFILE = resolve(SchedulerConfig(scores={"LeastAllocated": 1, "test.FewestWidgetsLeft": 10}))
+PROFILE = resolve(SchedulerConfig(scores={"LeastAllocated": 1, FEWEST_WIDGETS_LEFT: 10}))
 
 
 @st.composite

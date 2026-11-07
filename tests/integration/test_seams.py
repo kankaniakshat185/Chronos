@@ -1,52 +1,21 @@
-"""X-4/X-5 from test code only: a fake workload type and a fake provider run a real
-process through the unchanged runtime (the agent-side half of PX.9)."""
+"""Proof of modularity (PX.9), agent side: the test-only workload type and provider
+(`tests/extensions.py`) run a real process through the unchanged runtime. (The
+simulator doesn't run commands, so this is where `prepare` and `env` are proven.)"""
 
-import sys
 from pathlib import Path
 
 import pytest
 
-from chronos.agent.providers import Providers, register_provider
+from chronos.agent.providers import Providers
 from chronos.agent.runtime import ProcessRuntime
 from chronos.api import ObjectMeta, Pod, PodSpec
-from chronos.api.workload_types import Generic, register_workload_type
 from chronos.common.clock import RealClock
 from chronos.common.config import FencingConfig
 from chronos.testing.cluster import eventually
+from tests.extensions import WIDGET, WIDGET_TASK
 
 pytestmark = pytest.mark.integration
-WIDGET = "example.com/widget"
 clock = RealClock()
-
-
-class PrintsItsEnvironment(Generic):
-    """A test-only workload type: ignores `command` and reports what it was given."""
-
-    def prepare(self, pod: Pod) -> tuple[list[str], dict[str, str]]:
-        script = "import os; print(os.environ['WIDGETS'], os.environ['FROM_TYPE'])"
-        return [sys.executable, "-c", script], {"FROM_TYPE": "yes"}
-
-
-class WidgetProvider:
-    """A test-only provider: widgets are named, and the workload learns which it got."""
-
-    def __init__(self, resource: str, capacity: int) -> None:
-        self.free = [f"w{i}" for i in range(capacity)]
-        self.held: dict[str, list[str]] = {}
-
-    def allocate(self, uid: str, n: int) -> list[str]:
-        self.held[uid], self.free = self.free[:n], self.free[n:]
-        return self.held[uid]
-
-    def release(self, uid: str) -> None:
-        self.free += self.held.pop(uid, [])
-
-    def env(self, units: list[str]) -> dict[str, str]:
-        return {"WIDGETS": ",".join(units)}
-
-
-register_workload_type("test.prints-env", PrintsItsEnvironment())
-register_provider(WIDGET, WidgetProvider)
 
 
 async def test_fake_type_and_provider_through_the_unchanged_runtime(tmp_path: Path) -> None:
@@ -57,7 +26,7 @@ async def test_fake_type_and_provider_through_the_unchanged_runtime(tmp_path: Pa
     spec = PodSpec.model_validate(
         {
             "command": ["ignored"],
-            "workload_type": "test.prints-env",
+            "workload_type": WIDGET_TASK,
             "resources": {"requests": {WIDGET: 2}},
         }
     )
