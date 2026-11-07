@@ -16,6 +16,7 @@ then sleeps until --crash-after seconds pass and it exits with --exit-code.
 import argparse
 import os
 import signal
+import socketserver
 import sys
 import threading
 import time
@@ -38,7 +39,12 @@ def serve(port: int, started: float, ready_after: float, unhealthy_after: float 
         def log_message(self, *args: object) -> None:
             return None
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    class Server(ThreadingHTTPServer):
+        def server_bind(self) -> None:  # skip HTTPServer's reverse DNS lookup (getfqdn)
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = "127.0.0.1", port
+
+    server = Server(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
 

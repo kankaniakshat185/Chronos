@@ -2,7 +2,7 @@
 
 Chronos makes strong claims: "never more than R replicas", "an acknowledged write survives a crash", "a pod never lands on a node without enough slots". Each claim is backed by tests. But a passing test only proves something if it *would fail* when the claim breaks. This log records how that was checked: by deliberately breaking the code that upholds each claim and confirming that a test notices.
 
-It covers the MVP through PM-9b (70 hand-made mutations plus the simulator's 11 canaries so far), and gets a new entry every time a guarantee is added.
+It covers the MVP through PM-9b (71 hand-made mutations plus the simulator's 11 canaries so far), and gets a new entry every time a guarantee is added.
 
 ---
 
@@ -165,6 +165,7 @@ For this block the mutations were run by a small script (kept outside the repo) 
 | 68 | A registered provider is the one that hands out a resource's units (X-5) | `Providers` ignores the registry and always uses the counting provider | `test_seams.py`, the simulator seam proof | ✅ caught by both: the process got units "0", "1" instead of the test provider's "w0", "w1", the simulator saw no widget allocations, and the negative control (a broken test provider) went unnoticed |
 | 69 | The simulator really admits templates through the workload type (X-4) | the test-only type rejects every template (a mutation in test code) | the simulator seam proof | ✅ caught: no widget deployment could be created |
 | 70 | Another kind's controller can own pods (X-6; Stage 2's Job) | none needed: the bug was already there | a new test: a pod owned by a test-only kind must survive | ❌ the **existing code failed it**: the deployment controller deleted the pod within 2 s as an orphan of a Deployment (see 3.12). Fixed; the test is green |
+| 71 | The agent's metrics server starts without a reverse DNS lookup | `HTTPServer.server_bind` restored | the new unit test (`getfqdn` raises) | ✅ caught: "reverse DNS lookup of '127.0.0.1'" |
 
 ### PM-4: canaries (the simulator's own "test the tests", TESTING.md 6.5)
 
@@ -188,7 +189,7 @@ Since PM-9a, `disable_expectations` is also caught as S7 (10 of its 14 detection
 
 `tests/sim/test_canaries.py` scans seeds from 0 for each canary and fails if its whole budget (200-1 000 seeds) passes clean. Two canaries started at 0/40; neither could be fixed by changing the canary (see 4.10 and 4.11).
 
-**Score:** of 67 code mutations, 54 were caught on the first try and 13 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4, 1 in PM-5, 2 in PM-6, 2 in PM-9a). Every survivor led to a new or redesigned test, and all 67 are caught now. (#69 mutates test code; #70 is a real bug rather than an injected one.) (#55 plants a fault instead of changing code.) One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
+**Score:** of 68 code mutations, 55 were caught on the first try and 13 survived (5 up to PM-2, 2 in PM-3, 1 in PM-4, 1 in PM-5, 2 in PM-6, 2 in PM-9a). Every survivor led to a new or redesigned test, and all 68 are caught now. (#69 mutates test code; #70 is a real bug rather than an injected one.) (#55 plants a fault instead of changing code.) One more (#39) was caught only by the slow end-to-end test and got a focused one. Entry 25 checked the test harness itself rather than the code.
 
 ---
 
@@ -337,6 +338,7 @@ Bugs in Chronos itself, each caught by a test before it shipped:
 | PM-4 | **a resumed agent restarted evicted pods from its stale pod cache** after re-registering (S3; came in with PM-3's caching) | the simulator, seed 25 |
 | PM-4 | **concurrent relist and watch:** an older list wiped a pod the watch had delivered (S6; came in with the first fix for seed 25) | the simulator's S6 check, seed 21 |
 | PM-9b | **the deployment controller garbage-collected pods owned by any other kind**, which would have broken Stage 2's Jobs (X-6) | the seam proof, while checking `PHASE2-EXTENSION-POINTS.md` against the code (#70) |
+| PM-5 (found after PM-9b) | **agents on GitHub's macOS runners never registered**: the `/metrics` server, started before the agent's event loop, went through `HTTPServer.server_bind`, which calls `socket.getfqdn` on the bind address; that reverse DNS lookup stalled past every test's 10 s wait. CI's macOS job had been red since PM-5 | the macOS CI job (integration tests timing out with empty agent logs). Fixed by binding without the lookup (the test workload's HTTP server too); a unit test makes `getfqdn` fail, and fails if the old `server_bind` is restored (#71) |
 | PM-3 | a pod started by the agent was never reported Running: reporting needs a second sync, and nothing triggered one without polling | `test_watch.py` (#37) |
 | PM-3 | chronosd took more than 10 s to stop: uvicorn waited for the agents' 30 s long-poll watches | integration teardown timing out |
 | PM-3 | the first fix for that hung chronosd for good: answering *every* watch at once on shutdown made the in-process informers spin without ever yielding to the event loop | integration teardown again; about 30 leaked test servers at 20% CPU each (load average 180), which is how it was noticed. `Cluster.close()` now SIGKILLs a chronosd that ignores SIGTERM and fails the test |

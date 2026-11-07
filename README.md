@@ -284,3 +284,7 @@ docs/             # ADRs, benchmarks, the mutation-testing log, the devlog
 *   [Benchmarks](docs/BENCHMARKS.md): methodology, raw samples, plots and interpretation
 *   [Testing the tests](docs/testing-the-tests.md): every mutation check, the ones that survived, and the real bugs the tests found
 *   [Devlog](docs/devlog/): what was built each day, and what broke
+
+## License
+
+MIT License. See [`LICENSE`](LICENSE).

@@ -75,3 +75,32 @@ def test_unschedulable_reasons_are_bounded() -> None:
     message = "0/3 nodes available: Insufficient cpu (2/3 nodes), node NotReady (1/3 nodes)"
     assert _reasons(message) == ["Insufficient cpu", "node NotReady"]
     assert _reasons("0/0 nodes available: no nodes registered") == ["no nodes registered"]
+
+
+def test_the_agents_metrics_server_starts_without_a_reverse_dns_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`HTTPServer.server_bind` calls `socket.getfqdn`, a reverse lookup that stalled for
+    over 10 s on GitHub's macOS runners, before the agent had registered: every agent
+    there looked dead. The agent's metrics server must not do that lookup."""
+    import socket  # noqa: PLC0415
+    import types  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    from chronos.agent.main import serve_metrics  # noqa: PLC0415
+    from chronos.testing.cluster import free_port  # noqa: PLC0415
+
+    def no_lookups(name: str = "") -> str:
+        raise AssertionError(f"reverse DNS lookup of {name!r}")
+
+    monkeypatch.setattr(socket, "getfqdn", no_lookups)
+    port = free_port()
+    agent = types.SimpleNamespace(stats={"running": 2, "exited": 1})
+    server = serve_metrics(agent, "127.0.0.1", port)  # type: ignore[arg-type]
+    try:
+        body = httpx.get(f"http://127.0.0.1:{port}/metrics").text
+        assert 'chronos_agent_processes{state="running"} 2.0' in body
+    finally:
+        server.shutdown()
+        server.server_close()

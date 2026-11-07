@@ -3,11 +3,16 @@
 import asyncio
 import logging
 import signal
+import socket
+import socketserver
+import threading
 from pathlib import Path
 from typing import Annotated
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import typer
-from prometheus_client import CollectorRegistry, start_http_server
+from prometheus_client import CollectorRegistry, make_wsgi_app
+from prometheus_client.exposition import ThreadingWSGIServer
 from pydantic import ValidationError
 
 from chronos import __version__
@@ -126,13 +131,37 @@ def run(
         raise typer.Exit(code=2) from None
 
 
-def serve_metrics(agent: Agent, host: str, port: int) -> None:
+class _MetricsServer(ThreadingWSGIServer):
+    def server_bind(self) -> None:
+        # Not HTTPServer.server_bind: it calls socket.getfqdn(host), a reverse DNS lookup
+        # that can stall for many seconds (it did on GitHub's macOS runners), and this
+        # runs before the agent has registered. The name is only used for CGI variables.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = str(self.server_address[0]), self.server_address[1]
+        self.setup_environ()
+
+
+class _QuietHandler(WSGIRequestHandler):
+    def log_message(self, format: str, *args: object) -> None:
+        return None
+
+
+def serve_metrics(agent: Agent, host: str, port: int) -> WSGIServer:
     """A separate listener that Prometheus scrapes; the control plane never connects to
     agents (ADR-0010). Runs on its own thread."""
     registry = CollectorRegistry(auto_describe=False)
     registry.register(ProcessMetrics(AGENT_REGISTRY))
     registry.register(AgentCollector(lambda: agent.stats))
-    start_http_server(port, addr=host, registry=registry)
+    server_class = type(
+        "MetricsServer",
+        (_MetricsServer,),
+        {"address_family": socket.AF_INET6 if ":" in host else socket.AF_INET},
+    )
+    server: WSGIServer = make_server(
+        host, port, make_wsgi_app(registry), server_class, _QuietHandler
+    )
+    threading.Thread(target=server.serve_forever, name="metrics", daemon=True).start()
+    return server
 
 
 async def _main(agent: Agent, client: HttpStoreClient) -> None:
