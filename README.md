@@ -1,6 +1,8 @@
 <h1 align="center">Chronos</h1>
 
-A small container orchestrator in the spirit of Kubernetes, built from scratch in Python: declarative desired state, a versioned store with compare-and-swap and a write-ahead log, a filter/score scheduler, watches and informers, heartbeats and failure detection, self-fencing nodes, rolling updates and probes. Workloads are real OS processes. Every guarantee here is backed by three things: a property or real-process test that states it, a deterministic simulator that checks it after every event of thousands of seeded fault schedules, and a mutation check showing that test fails when the code that upholds the guarantee is broken.
+A small Kubernetes-style orchestrator built from scratch in Python: declarative desired state, a versioned store with compare-and-swap and a write-ahead log, a filter/score scheduler, watches and informers, heartbeats and failure detection, self-fencing nodes, rolling updates and probes. Workloads are real OS processes, not containers.
+
+The key guarantees are each checked three ways: a property or real-process test that states the guarantee, a deterministic simulator that verifies it after every event across thousands of seeded fault schedules, and a mutation check showing the test fails when the code that upholds the guarantee is broken.
 
 <p align="center">
   <a href="#features">Features</a> ·
