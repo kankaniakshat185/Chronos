@@ -27,8 +27,7 @@ Bound pods must reach the right agent reliably, including after agent restarts a
 ## 4. How
 ### Components & files
 - `src/chronos/agent/main.py`: wiring + `TaskGroup` of the loops below.
-- `src/chronos/agent/heartbeat.py`: registration, heartbeat, lease file (ADR-0011/0012).
-- `src/chronos/agent/sync_loop.py`: pod informer + local sync.
+- `src/chronos/agent/agent.py`: registration, heartbeat, lease file (ADR-0011/0012), the pod informer and the local sync loop; the sync decisions are pure, in `src/chronos/core/agent_sync.py`.
 - `src/chronos/core/agent_sync.py`: pure diff.
 ### Mechanism
 Agent loops (all in one `asyncio.TaskGroup`):

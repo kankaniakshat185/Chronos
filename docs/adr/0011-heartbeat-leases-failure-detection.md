@@ -2,7 +2,9 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P2 | — | — |
+| Accepted | 2026-10-21 | P2 | — | — |
+
+> **Amended at Stage 1 exit (2026-11-09), Accepted:** (1) the agent's `heartbeat_timeout` is `max(0.8 × interval, fence_timeout / 2)`, not 0.8 s: chaos showed an overloaded `chronosd` missing a 0.8 × interval timeout, so agents fenced, restarted everything at once and kept it overloaded. Waiting longer is safe because the lease counts from the send time (ADR-0012). (2) The **mass-eviction guard was not built** in Stage 1; startup grace was. A partition between `chronosd` and most nodes evicts them, and their self-fenced workloads are replaced when they return.
 
 ## 1. What
 Agents heartbeat every second. The control plane, using **only its own monotonic clock**, moves each node through **Ready → Unknown → NotReady** based on how long it's been silent: Unknown stops new placements, and NotReady triggers eviction. Agent restarts are detected by an **epoch**, the control plane gives everyone a grace period after its own restart, and a guard pauses mass eviction.
@@ -31,7 +33,7 @@ To self-heal, the control plane must decide that a node is gone. In an asynchron
 ### Components & files
 - `src/chronos/core/node_health.py`: pure condition function.
 - `src/chronos/controllers/node_lifecycle.py`: tick loop, transitions, eviction (P4), guards.
-- `src/chronos/server/routes/nodes.py`: heartbeat endpoint.
+- `src/chronos/server/app.py`: heartbeat endpoint; `src/chronos/store/leases.py`: the leases.
 ### Mechanism
 **Heartbeat endpoint:**
 ```python
@@ -60,7 +62,7 @@ def condition(silence: float, cfg) -> Cond:
 | Param | Default | Constraint |
 |-------|---------|------------|
 | `heartbeat_interval` | 1.0 s | |
-| `heartbeat_timeout` | 0.8 s | < interval |
+| `heartbeat_timeout` | `max(0.8 × interval, fence_timeout / 2)` | see the amendment above |
 | `node_grace` | 4.0 s | ≥ 3 × interval |
 | `eviction_timeout` | 10.0 s | > `fence_timeout + termination_grace + drift_margin` (ADR-0012) |
 | `lifecycle_tick` | 0.5 s | adds ≤ tick to detection latency |

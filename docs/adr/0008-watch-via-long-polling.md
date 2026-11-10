@@ -29,8 +29,8 @@ Controllers and agents must react to changes quickly without listing the whole c
 ## 4. How
 ### Components & files
 - `src/chronos/store/watchlog.py`: ring buffer + waiters.
-- `src/chronos/server/routes/watch.py`: endpoint.
-- `src/chronos/controllers/informer.py`: client side (list → watch → relist).
+- `src/chronos/server/app.py`: the watch endpoint; `src/chronos/store/watchlog.py`: the revision log it serves.
+- `src/chronos/controllers/runtime.py`: client side, `Informer` (list → watch → relist).
 ### Mechanism
 **Server:**
 ```python

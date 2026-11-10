@@ -29,7 +29,7 @@ A scheduled pod has to *be* something. If it's fake, there are no real crashes, 
 ## 4. How
 ### Components & files
 - `src/chronos/agent/runtime.py`: `Runtime` protocol + `ProcessRuntime`.
-- `src/chronos/agent/supervisor.py`: per-pod state machine (start, monitor, restart with backoff, stop).
+- `src/chronos/agent/runtime.py`: the process runtime (start under a shim, monitor, stop); `src/chronos/core/agent_sync.py`: the per-pod decisions (start, restart with backoff, stop), pure.
 - `src/chronos/testing/workload.py`: controllable test workload.
 ### Mechanism
 ```python

@@ -41,8 +41,8 @@ Kubernetes Deployments don't guarantee at-most-R under partitions (StatefulSets 
 ## 4. How
 ### Components & files
 - `src/chronos/core/fencing.py`: pure `should_fence(last_ok_send, now, cfg)`.
-- `src/chronos/agent/heartbeat.py`: tracks `last_ok_send`, writes the lease file.
-- `src/chronos/shim/main.py`: `chronos-shim` entry point (~100 LOC, stdlib only).
+- `src/chronos/agent/agent.py`: tracks `last_ok_send`, writes the lease file.
+- `src/chronos/shim/__main__.py`: `chronos-shim` entry point (~100 LOC, stdlib only).
 - `src/chronos/common/config.py`: inequality validation.
 ### Mechanism
 **Agent side:**

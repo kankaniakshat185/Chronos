@@ -30,8 +30,8 @@ The store is in memory. Without durability, a `chronosd` crash loses deployments
 ## 4. How
 ### Components & files
 - `src/chronos/store/wal.py`: segment writer, `append_and_sync`, group commit.
-- `src/chronos/store/snapshot.py`: write/load.
-- `src/chronos/store/recovery.py`: startup procedure.
+- `src/chronos/store/wal.py`: snapshots (write/load) alongside the log.
+- `src/chronos/store/store.py`: `Store.open`, the startup (recovery) procedure.
 - `src/chronos/store/codec.py`: record framing.
 - `src/chronos/common/crashpoint.py`: fault hooks.
 - CLI: `chronosd wal dump|verify`.

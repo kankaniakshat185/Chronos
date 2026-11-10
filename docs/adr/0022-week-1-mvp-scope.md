@@ -2,9 +2,11 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Deprecated (2026-11-06, end of PM-3: every shortcut below is paid down; → Superseded at Stage 1 exit) | 2026-10-24 (revised 2026-11-04) | Stage 1, Part A | — | — |
+| Superseded | 2026-10-24 (revised 2026-11-04) | Stage 1, Part A | — | ADR-0008, 0009, 0012, 0015, 0016, 0024 |
 
 > **Revised 2026-11-04:** the plan was split into Stage 1 (Orchestration) and Stage 2 (GPU/CUDA, deferred). The MVP now demonstrates the hard-constraint rule with a generic extended resource (`chronos.dev/slot`) instead of a simulated GPU. The original one-week framing is retired; the plan now defines order and scope only, with no hour estimates.
+
+> **Superseded at Stage 1 exit (2026-11-09)** by the designs its shortcuts stood in for: watches and informers ([ADR-0008](0008-watch-via-long-polling.md), [ADR-0009](0009-level-triggered-reconciliation.md)), self-fencing and two-phase deletion ([ADR-0012](0012-agent-self-fencing.md)), the WAL ([ADR-0015](0015-wal-and-snapshots.md)), simulation ([ADR-0016](0016-deterministic-simulation-testing.md)) and metrics ([ADR-0024](0024-prometheus-grafana-observability.md)). Every register row below is closed, or carried over in the README's limitations (GPU and Jobs: Stage 2; HA: Backlog).
 
 ## 1. What
 The MVP deliberately ships a **vertical slice with documented, temporary shortcuts**:

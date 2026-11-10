@@ -2,9 +2,11 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 (amended 2026-11-04) | P0 (types), P3 (accounting), P10 (limits); X-1/X-2 in the MVP | — | — |
+| Accepted | 2026-10-21 (amended 2026-11-04) | P0 (types), P3 (accounting), P10 (limits); X-1/X-2 in the MVP | — | — |
 
 > **Amended 2026-11-04 (still Proposed, so amended in place):** generalized for the Stage 1 extension seams, [ADR-0023](0023-extension-seams.md) X-1/X-2: resources are a map, and any name other than `cpu`/`memory` is an extended resource.
+
+> **Accepted at Stage 1 exit (2026-11-09).** Memory limits are enforced as described (`ProcessRuntime.enforce_memory`, every 0.5 s, OOMKilled). The warning when `limits.cpu` is set was **not built**; the README's limitations section is the only notice that CPU limits aren't enforced.
 
 ## 1. What
 Resources are a **map `resource name → non-negative int`**. CPU is the entry `cpu` in integer **millicores**, memory is `memory` in integer **bytes**, and **any other name is an extended resource** counted in whole units: integer-only, non-fractional, requests == limits, never overcommitted, and a node that doesn't advertise it has capacity 0. There are no floats anywhere in accounting, and no resource name is hard-coded beyond `cpu` and `memory`. The scheduler reserves **requests** against a node's **declared** capacity. **Memory limits** (Tier 2) are enforced by RSS polling and OOM-kill; **CPU limits are not enforced**, and that is documented.
@@ -36,7 +38,7 @@ Scheduling is arithmetic: if `0.1 + 0.2 != 0.3` creeps into capacity checks, S2 
 ### Components & files
 - `src/chronos/api/quantity.py`: parse/format.
 - `src/chronos/api/resources.py`: `Resources = Mapping[str, int]` helpers (`add`, `sub`, `fits_in`, all over the union of names, missing = 0) and the extended-resource rule.
-- `src/chronos/agent/limits.py`: RSS monitor (Tier 2).
+- `src/chronos/agent/runtime.py`: `enforce_memory`, the RSS monitor (Tier 2).
 ### Mechanism
 **Parsing:**
 ```

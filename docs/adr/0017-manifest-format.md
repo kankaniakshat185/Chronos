@@ -2,9 +2,11 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-10-21 | P1 | — | — |
+| Accepted | 2026-10-21 | P1 | — | — |
 
 > **Amended 2026-11-04 (still Proposed, so amended in place):** generalized for the Stage 1 extension seams, [ADR-0023](0023-extension-seams.md) X-1/X-2/X-4/X-6: arbitrary resource names, a `workload_type` field, and kind dispatch through the kind registry.
+
+> **Accepted at Stage 1 exit (2026-11-09).** The validation rules below hold in the models (`api/`); the file layout is `cli/manifest.py` plus `apply` in `cli/main.py`.
 
 ## 1. What
 Users declare desired state in a small, **Kubernetes-flavoured but not Kubernetes-compatible** YAML format, parsed with `yaml.safe_load` and validated by the **same Pydantic models the API uses**, with unknown fields rejected. `chronosctl apply` creates or CAS-replaces the full spec.
@@ -31,7 +33,7 @@ There has to be a way to say "3 replicas of X with these resources". Copying the
 ## 4. How
 ### Components & files
 - `src/chronos/api/deployment.py`: `DeploymentSpec`, `PodTemplate`, `Probe`, `Strategy`.
-- `src/chronos/cli/apply.py`: load → validate → create-or-update.
+- `src/chronos/cli/manifest.py`: load → validate; `src/chronos/cli/main.py`: `apply`, create-or-update.
 - `examples/*.yaml`.
 ### Mechanism
 **Schema example:**

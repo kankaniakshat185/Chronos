@@ -137,7 +137,7 @@ Safety invariants (S) and liveness properties (L). Every safety row is also chec
 | :--- | :--- | :--- |
 | **S1** | a pod is bound to at most one node, once | [store tests](tests/unit/test_store.py), [stateful model](tests/property/test_store_model.py) |
 | **S2** | for every resource name, Σ requests ≤ capacity on every node | [scheduler properties](tests/property/test_schedule_props.py), [bind property](tests/property/test_store_bind_props.py), [integration](tests/integration/test_scheduling.py) |
-| **S3** | at most R live processes per deployment, under agent pause, agent crash and partition | [process groups sampled every 20 ms](tests/integration/test_fencing.py), [restart](tests/integration/test_orphans.py), [node loss](tests/integration/test_deployments.py) |
+| **S3** | at most R live processes per deployment, under agent pause, agent crash and network partition; after a whole-node freeze, a bounded window of one shim poll (design limitation 2) | [process groups sampled every 20 ms](tests/integration/test_fencing.py), [restart](tests/integration/test_orphans.py), [node loss](tests/integration/test_deployments.py) |
 | **S4** | a cut-off node's workloads stop within F + K | [fencing](tests/integration/test_fencing.py), [shim](tests/integration/test_shim.py), [boundaries](tests/unit/test_fencing.py), [send-time rule](tests/unit/test_agent_fencing.py) |
 | **S5** | revisions strictly increase; a stale compare-and-swap never succeeds | [stateful model](tests/property/test_store_model.py) |
 | **S6** | a watch delivers every change after its revision, in order, or fails with `410 Gone` | [replay properties](tests/property/test_watch_props.py), [both clients](tests/contract/test_store_client.py), [informer relists](tests/unit/test_runtime.py) |
@@ -187,16 +187,23 @@ What still limits Chronos, as measured:
 
 ## Limitations & Non-Goals
 
-These are scope boundaries and deliberate trade-offs, not oversights.
+**Not done in Stage 1**, each with where it's handled:
 
-*   **A control-plane outage longer than the fence timeout stops every workload.** Agents can't tell a dead control plane from a partition, so they fence: safety over availability (see decision 1).
-*   **"No duplicate replicas" is scoped to agent pause, agent crash and network partition.** After a whole-node freeze (a VM pause that stops the shims too), a stale workload can run for at most one shim poll (100 ms) alongside its replacement; Kubernetes has the same limit. This assumes the node's monotonic clock keeps advancing across the freeze, which holds on one host.
-*   **Single machine, single control plane.** Nodes are processes on one host; there is no control-plane HA.
-*   **Little resource isolation.** Requests are placement accounting. Memory limits are enforced by polling resident memory every 0.5 s, not by a cgroup, so a fast allocation can overshoot for one interval; CPU is advisory.
-*   **Long-running deployments only.** No run-to-completion jobs yet.
-*   **No GPU support yet.** Planned as Stage 2, on the extension seams: a GPU is an extended resource, a CUDA task is a workload type, device assignment is a resource provider.
-*   **No auth, TLS or multi-tenancy.** Built for a trusted localhost.
-*   **Extensions are registered in-process.** No plugin loader.
+*   **No GPU/CUDA support: planned, Stage 2 (deferred).** Nothing detects or uses GPUs, and no CUDA runs. Stage 1 provides the seams GPU support plugs into: extended resources, workload types and resource providers, proven by test-only extensions ([`tests/extensions.py`](tests/extensions.py)).
+*   **No jobs / run-to-completion workloads: planned, Stage 2 (deferred)** ([ADR-0020](docs/adr/0020-run-to-completion-jobs.md)). Only long-running Deployments; the kind and controller registries make Jobs purely additive.
+*   **Scheduling policies are generic.** `LeastAllocated` (spread, default) or `MostAllocated` (pack). Resource-aware stranding avoidance for GPUs (`GpuAvoidance`) is **planned, Stage 2 (deferred)**.
+*   **Single machine, single control plane.** Nodes are processes on one host; there's no control-plane HA. → **Backlog**, not scheduled ([ADR-0018](docs/adr/0018-control-plane-high-availability.md)).
+*   **Little resource isolation.** Requests are placement accounting. Memory limits are enforced by polling resident memory every 0.5 s and killing the pod (`OOMKilled`), not by a cgroup, so a fast allocation can overshoot for one interval; CPU stays advisory ([ADR-0014](docs/adr/0014-resource-model.md)).
+*   **No auth, TLS or multi-tenancy.** Built for a trusted localhost. (Non-goal.)
+*   **Extensions are in-process only.** There's no plugin loader; new kinds, controllers, resources, workload types and providers are registered by in-tree code. (Conscious limit, [ADR-0023](docs/adr/0023-extension-seams.md).)
+
+### Design limitations (deliberate)
+
+These stay true at the end of Stage 1; they are trade-offs, not missing work.
+
+1. **A control-plane outage longer than `fence_timeout` stops every workload (fencing Option A).** Agents can't tell a dead control plane from a partition, so they fence. This trades availability for safety (no duplicates). Real Kubernetes keeps pods running while the API server is down; Chronos deliberately doesn't. When the control plane returns, startup grace prevents evictions and agents restart their still-bound pods (L4). A smarter fencing rule (e.g. peer checks) was rejected as too complex; the real fix is control-plane HA, which is in the Backlog (P11.x, ADR-0018). Tested by U2.2 (b) ([`test_long_outage_fences_everything_then_reconverges`](tests/integration/test_control_plane_restart.py)).
+2. **"No duplicate replicas" (S3/S4) is scoped to agent pause, agent crash and network partition.** For a **whole-node freeze** (a VM pause that stops the shims too), there's a bounded window of **at most one shim poll (100 ms)** after the node resumes, during which a stale workload may run alongside its replacement before the shim SIGKILLs it. Kubernetes has the same limit. The README must not claim "no duplicates under any pause".
+3. **Fencing assumes the node's monotonic clock keeps advancing across a freeze.** That holds for Chronos's single-host setup (all "nodes" share the host clock). On real VMs it depends on the hypervisor's clock handling; if the guest clock stalled, the window in #2 could extend up to `fence_timeout`.
 
 ## Code Quality
 
@@ -280,6 +287,8 @@ docs/             # ADRs, benchmarks, the mutation-testing log, the devlog
 
 ## Documentation
 
+*   [Write-up: what breaking my orchestrator 10,000 times taught me](docs/WRITEUP.md): the three best bugs, with postmortems
+*   [Architecture](docs/ARCHITECTURE.md): the processes, object model, state machines and sequence diagrams (apply, node failure, partition and fencing, control-plane recovery, rolling update)
 *   [Architecture Decision Records](docs/adr/README.md): 24 decisions, each with its context, alternatives and consequences
 *   [Benchmarks](docs/BENCHMARKS.md): methodology, raw samples, plots and interpretation
 *   [Testing the tests](docs/testing-the-tests.md): every mutation check, the ones that survived, and the real bugs the tests found

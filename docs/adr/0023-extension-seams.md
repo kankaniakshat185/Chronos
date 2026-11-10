@@ -2,7 +2,9 @@
 
 | Status | Date | Phase | Supersedes | Superseded by |
 |--------|------|-------|------------|---------------|
-| Proposed | 2026-11-04 | Stage 1 (MVP, PM-1, PM-3, PM-4, PM-6, PM-9b) | — | — |
+| Accepted | 2026-11-04 | Stage 1 (MVP, PM-1, PM-3, PM-4, PM-6, PM-9b) | — | — |
+
+> **Accepted at Stage 1 exit (2026-11-09).** X-1–X-8 exist as described and X-9 is green (PM-9b): test-only extensions pass the scheduling and bind properties, run a real process, and hold every invariant in the simulator. Writing the proof found one real bug, now fixed: the deployment controller garbage-collected pods owned by any other kind, which would have broken Stage 2's Jobs.
 
 ## 1. What
 Stage 1 has eight small **extension seams** (X-1–X-8), each a plain protocol plus a module-level registry: a resource map, the extended-resource rule, and registries for scheduler plugins, workload types, resource providers, and kinds/controllers. Together with generic invariants and an optional-dependency guard, they let Stage 2 (GPU/CUDA, deferred) be added as **new code behind existing extension points, with no rewrites of Stage 1 code**. An **in-process proof-of-modularity test** (X-9) shows it. There is **no plugin loader**: X-10 was dropped as a conscious limit.
@@ -39,7 +41,7 @@ The original plan wove GPU into Stage 1: `Resources(cpu, memory, gpu)`, a GPU-sp
 | X-6 kind + controller registry | `api/kinds.py`, `controllers/runtime.py` | PM-3 |
 | X-7 generic invariants | `testing/invariants.py`, `sim/faults.py` | PM-4 / PM-6 |
 | X-8 optional-dependency guard | `tests/unit/test_architecture.py` | PM-1 |
-| X-9 proof of modularity | `tests/property/test_modularity.py` | early in MVP; final in PM-9b |
+| X-9 proof of modularity | `tests/extensions.py` (the test-only extensions); `tests/property/test_modularity_widget.py`, `tests/integration/test_seams.py`, `tests/sim/test_seam_proof.py` | early in MVP; final in PM-9b |
 ### Mechanism
 Every registry has the same shape, and nothing more:
 ```python
@@ -101,7 +103,7 @@ Done: X-1, X-2, X-3 (MVP), X-4, X-5, X-8 (PM-1), early X-9. Deviations from the 
 - X-1: S2 property over random resource-name sets; lint test that `src/` has no `gpu` literal (GPU is Stage 2, deferred).
 - X-2: parsing properties; **S11** at property, sim, integration and chaos layers; canary `extended_resource_soft_constraint`.
 - X-3: a test-registered plugin changes placement without framework change.
-- X-4: unknown type → 422; a fake type runs through the unchanged supervisor.
+- X-4: unknown type → 422; a fake type runs through the unchanged runtime.
 - X-5: **S12** property and integration; canary `provider_reuse_unit`.
 - X-6: a fake kind gets CRUD + reconcile without framework change.
 - X-7: sim/chaos runs with random extended resources.

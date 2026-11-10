@@ -20,17 +20,17 @@ All ADRs start as **Proposed** (drafted during planning, 2026-10-21). They becom
 | [0008](0008-watch-via-long-polling.md) | Watch via long-polling on resource versions | Accepted | P1 |
 | [0009](0009-level-triggered-reconciliation.md) | Level-triggered reconciliation with informers, work queue, resync | Accepted | P4 |
 | [0010](0010-pull-based-agents.md) | Pull-based node agents | Accepted | P2 |
-| [0011](0011-heartbeat-leases-failure-detection.md) | Heartbeat leases and a node condition state machine | Proposed | P2 |
+| [0011](0011-heartbeat-leases-failure-detection.md) | Heartbeat leases and a node condition state machine | Accepted | P2 |
 | [0012](0012-agent-self-fencing.md) | Self-fencing (agent + per-pod shim) to bound duplicates during partitions | Accepted | P4 |
 | [0013](0013-filter-score-scheduler.md) | Filter/score scheduler with atomic binding | Accepted | P3, MVP |
-| [0014](0014-resource-model.md) | Resource model: an integer resource map (millicores, bytes, extended units), request-based | Proposed (amended 2026-11-04) | P0/P3, MVP |
+| [0014](0014-resource-model.md) | Resource model: an integer resource map (millicores, bytes, extended units), request-based | Accepted | P0/P3, MVP |
 | [0015](0015-wal-and-snapshots.md) | Persistence via WAL with CRC framing and snapshots | Accepted | P6 |
 | [0016](0016-deterministic-simulation-testing.md) | Deterministic simulation testing | Accepted | P5 |
-| [0017](0017-manifest-format.md) | Own YAML manifest schema validated by Pydantic | Proposed (amended 2026-11-04) | P1 |
+| [0017](0017-manifest-format.md) | Own YAML manifest schema validated by Pydantic | Accepted | P1 |
 | [0018](0018-control-plane-high-availability.md) | Control-plane high availability | Deferred (Backlog, not scheduled) | Backlog |
 | [0019](0019-gpu-extended-resource.md) | GPUs as an integer, non-shareable, hard-constrained resource with slot assignment | Deferred – Stage 2 | Stage 2 (P9) |
 | [0020](0020-run-to-completion-jobs.md) | Run-to-completion `Job` kind | Deferred – Stage 2 | Stage 2 (P9) |
 | [0021](0021-cuda-workload-toolchain.md) | CUDA workloads via numba-cuda, with a simulate mode | Deferred – Stage 2 | Stage 2 (P9) |
-| [0022](0022-week-1-mvp-scope.md) | MVP scope (formerly "Week-1 MVP"): temporary shortcuts and their pay-down plan | Deprecated (end of PM-3) | Stage 1, Part A |
-| [0023](0023-extension-seams.md) | Extension seams: resource map, extended resources and small registries | Proposed | Stage 1 |
+| [0022](0022-week-1-mvp-scope.md) | MVP scope (formerly "Week-1 MVP"): temporary shortcuts and their pay-down plan | Superseded (Stage 1 exit) | Stage 1, Part A |
+| [0023](0023-extension-seams.md) | Extension seams: resource map, extended resources and small registries | Accepted | Stage 1 |
 | [0024](0024-prometheus-grafana-observability.md) | Prometheus + Grafana for metrics and dashboards (required) | Accepted | Stage 1, PM-5 |
